@@ -1,0 +1,25 @@
+# bePm 后端依赖
+# ===============
+# SDK 模式：至少安装一个 LLM SDK（推荐 anthropic）
+# CLI 模式：无需任何 LLM SDK，只需装 claude 命令行工具
+
+# Web 框架
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+
+# 数据校验
+pydantic>=2.0.0
+
+# WebSocket 支持
+websockets>=12.0
+
+# 日期处理
+python-dateutil>=2.9.0
+
+# ── LLM SDK（按需选装至少一个）────────────────────────────────
+# Anthropic SDK（默认后端，LLM_SDK_TYPE=anthropic）
+anthropic>=0.39.0
+
+# OpenAI SDK（可选后端，LLM_SDK_TYPE=openai）
+# 兼容 DeepSeek / 通义千问 / Moonshot / Ollama 等所有 OpenAI 兼容端点
+# openai>=1.0.0

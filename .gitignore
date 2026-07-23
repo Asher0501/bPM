@@ -1,0 +1,22 @@
+# 用户数据
+.projects/
+
+# Python 缓存
+__pycache__/
+*.pyc
+.pytest_cache/
+backend/.pytest_cache/
+
+# 遗留数据目录
+backend/data/
+
+# IDE 个人配置
+.obsidian/
+.vscode/
+.idea/
+
+# 临时文件
+*.tmp*
+
+# 审查产物
+review_output/

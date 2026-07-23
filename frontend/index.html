@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<title>bePm — AI 辅助项目排期管理</title>
+<link rel="stylesheet" href="/css/style.css">
+<script src="https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
+<script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+<script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+</head>
+<body>
+
+<!-- 顶部导航栏 -->
+<header id="topbar">
+  <h1>📊 bePm</h1>
+  <span class="subtitle">AI 辅助项目排期管理</span>
+  <span id="sys-status" style="font-size:11px;color:#f59e0b;margin-left:8px">loading...</span>
+  <nav>
+    <button id="btn-new-project" class="btn-primary" onclick="app.showNewProjectPanel()">+ 新建项目</button>
+    <button class="btn-outline" onclick="app.loadProjectList()">📋 项目列表</button>
+  </nav>
+</header>
+
+<!-- 主布局: 三栏 -->
+<div id="main-layout">
+
+  <!-- 左侧: 输入面板 -->
+  <aside id="left-panel">
+    <!-- 新建项目面板 -->
+    <div id="panel-new-project" class="panel">
+      <h2>新建项目排期</h2>
+      <label>项目描述（自然语言）</label>
+      <textarea id="input-description" rows="12" placeholder="描述你的项目，包括：
+- 有哪些任务/阶段
+- 任务间的依赖关系（哪些必须先完成）
+- 预估工期
+- 参与人员 / 特性Owner
+
+示例:
+我们计划开发一个电商平台，12月31日前上线。
+数据库设计需要3天，由后端负责。
+后端API开发需要20天，依赖数据库设计和接口设计。
+前端开发需要15天，依赖接口设计。
+接口设计需要2天，由后端和前端共同完成。
+联调测试需要5天，依赖后端API和前端都完成。
+部署上线需要1天，依赖联调测试通过。"></textarea>
+      <label>截止日期</label>
+      <input type="date" id="input-deadline">
+      <label>补充信息（可选）</label>
+      <textarea id="input-additional" rows="3" placeholder="任何需要补充的信息..."></textarea>
+      <label>或上传文件（可选）</label>
+      <input type="file" id="input-file" accept=".txt,.md,.json">
+      <button class="btn-primary full-width" onclick="app.createSchedule()">🚀 自动排期</button>
+      <div id="create-status" class="status-msg"></div>
+    </div>
+
+    <!-- 进展更新面板（统一入口：更新进展 + 节点管理 + 增删边） -->
+    <div id="panel-progress" class="panel hidden">
+      <h2>项目进展</h2>
+      <label>描述进展或变更（自然语言）</label>
+      <textarea id="input-progress" rows="5" placeholder="可以输入任何内容，AI 会自动判断意图：
+- 「数据库设计完成了」→ 更新进度
+- 「新增性能测试3天，依赖后端API」→ 添加节点
+- 「删除代码评审」→ 删除节点
+- 「让前端依赖数据库设计」→ 添加依赖边"></textarea>
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <button class="btn-primary" onclick="app.submitProgress()" style="flex:1">📝 提交（AI 自动判断意图）</button>
+        <button class="btn-outline" onclick="app.toggleManualAdd()" style="font-size:12px">手动添加节点</button>
+      </div>
+      <div id="manual-add-form" class="hidden" style="margin-top:6px">
+        <input type="text" id="input-node-name" placeholder="任务名称" style="margin-bottom:4px">
+        <div style="display:flex;gap:6px">
+          <input type="text" id="input-node-days" placeholder="工期(天)" style="width:80px">
+          <input type="text" id="input-node-deps" placeholder="依赖ID，逗号分隔" style="flex:1">
+        </div>
+        <button class="btn-primary" onclick="app.addNodeManual()" style="width:100%;margin-top:4px;font-size:12px">手动添加</button>
+      </div>
+      <div id="add-node-status" class="status-msg"></div>
+      <div id="progress-status" class="status-msg"></div>
+    </div>
+
+    <!-- 项目列表面板 -->
+    <div id="panel-project-list" class="panel hidden">
+      <h2>项目列表</h2>
+      <div id="project-list"></div>
+    </div>
+
+    <!-- 节点列表 -->
+    <div id="panel-nodes" class="panel hidden">
+      <h2>节点列表</h2>
+      <div id="node-list" style="max-height:400px;overflow-y:auto"></div>
+    </div>
+  </aside>
+
+  <!-- 中间: DAG 可视化 -->
+  <main id="center-panel">
+    <div id="dag-header">
+      <span id="dag-title">选择或创建一个项目</span>
+      <span id="dag-info"></span>
+      <span id="dag-layout-msg" style="color:#ef4444;font-size:11px;margin-left:8px"></span>
+    </div>
+    <div id="cy-container"></div>
+    <div id="dag-legend">
+      <span><span class="legend-dot" style="background:#059669"></span> 已完成</span>
+      <span><span class="legend-dot" style="background:#4f46e5"></span> 进行中</span>
+      <span><span class="legend-dot" style="background:#64748b"></span> 未开始</span>
+      <span><span class="legend-dot" style="background:#e11d48"></span> 延迟</span>
+      <span><span class="legend-dot" style="background:#d97706"></span> 阻塞</span>
+      <span><span class="legend-path"></span> 关键路径</span>
+      <span style="font-size:11px;color:var(--text-muted)">★ 关键节点</span>
+    </div>
+  </main>
+
+  <!-- 右侧: 风险与建议面板 -->
+  <aside id="right-panel">
+    <div id="panel-risks" class="panel">
+      <h2>⚠️ 风险与建议</h2>
+      <div id="risk-list">
+        <p class="placeholder-text">暂无风险数据</p>
+      </div>
+    </div>
+
+    <div id="panel-stats" class="panel">
+      <h2>📈 项目统计</h2>
+      <div id="stats-content">
+        <p class="placeholder-text">暂无项目数据</p>
+      </div>
+    </div>
+
+    <div id="panel-buffer" class="panel">
+      <h2>⏳ 缓冲区</h2>
+      <div id="buffer-content">
+        <p class="placeholder-text">暂无缓冲数据</p>
+      </div>
+    </div>
+  </aside>
+
+</div>
+
+<!-- 编辑节点弹窗 -->
+<div id="modal-edit-node" class="modal-overlay hidden" onclick="if(event.target===this)app.closeEditModal()">
+  <div class="modal-box">
+    <h3>编辑节点</h3>
+    <div class="modal-body">
+      <label>名称</label>
+      <input type="text" id="edit-node-name">
+      <label>工期（天）</label>
+      <input type="number" id="edit-node-days" step="0.5" min="0.5">
+      <label>置信度 (0.0-1.0)</label>
+      <input type="number" id="edit-node-confidence" step="0.1" min="0" max="1">
+      <label>FO（特性Owner，逗号分隔）</label>
+      <input type="text" id="edit-node-resources">
+      <label>前置依赖（勾选依赖的任务）</label>
+      <div id="edit-node-deps-list" style="max-height:150px;overflow-y:auto;border:1px solid var(--border);border-radius:4px;padding:6px"></div>
+      <label>备注</label>
+      <textarea id="edit-node-notes" rows="2"></textarea>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+      <button class="btn-outline" onclick="app.closeEditModal()">取消</button>
+      <button class="btn-primary" onclick="app.saveEditNode()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 删除确认弹窗 -->
+<div id="modal-delete-node" class="modal-overlay hidden" onclick="if(event.target===this)app.closeDeleteModal()">
+  <div class="modal-box">
+    <h3>确认删除</h3>
+    <div class="modal-body">
+      <p>确定要删除 <strong id="delete-node-name"></strong> 吗？</p>
+      <div id="delete-affected-info" style="margin-top:8px"></div>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+      <button class="btn-outline" onclick="app.closeDeleteModal()">取消</button>
+      <button class="btn-primary" onclick="app.confirmDeleteNode()" style="background:#ef4444">确认删除</button>
+    </div>
+  </div>
+</div>
+
+<script src="/js/api.js?v=16"></script>
+<script src="/js/dag.js?v=16"></script>
+<script src="/js/ws.js?v=16"></script>
+<script src="/js/app.js?v=16"></script>
+</body>
+</html>
