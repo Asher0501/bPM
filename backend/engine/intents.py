@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
-"""语义意图 → 原子 API 调用链的映射层
+"""纯原子意图定义 + 编排器（意图 → 原子操作，1:1 映射）
 
-AI 只输出语义意图（不关心 task_id、不关心 CRUD 细节），
-编排器负责将意图翻译为原子 API 调用序列。
+意图层只暴露 DAG 拓扑的原子操作。LLM 自行组合原子操作完成复杂场景。
 """
 
 import json
@@ -18,110 +17,148 @@ class AtomicOp:
     params: dict = field(default_factory=dict)
 
 
-# ---- 语义意图定义 ----
+# ---- 语义意图定义（纯原子） ----
 
 INTENT_DEFS = {
-    "add_connected_node": {
-        "description": "新增一个节点并建立边连接。downstream_deps 只填直接紧后任务",
+    "add_node": {
+        "description": "新增一个任务节点。节点创建后是孤立的——需要额外用 add_edge 建立依赖关系。",
         "params": ["name", "estimated_days", "confidence", "resources", "notes",
-                    "pre_dependencies",    # 新节点依赖哪些节点（直接前驱）
-                    "downstream_deps"],     # 直接依赖新节点的任务（不填间接后继！）
+                    "pre_dependencies"],       # 可选：创建时直接指定前驱
         "example": {
-            "intent": "add_connected_node",
+            "intent": "add_node",
             "name": "用户调研",
             "estimated_days": 3,
             "confidence": 0.9,
-            "downstream_deps": ["task_1", "task_2"],
-            "notes": "用户调研应在UI设计和数据库设计之前"
+            "pre_dependencies": ["task_1"],
+            "resources": ["产品经理"],
+            "notes": "在UI设计之前进行"
         }
     },
-    "add_task_in_chain": {
-        "description": "在已有依赖链中插入一个任务",
-        "params": ["name", "estimated_days", "after_task", "before_tasks"],
-        "example": {
-            "intent": "add_task_in_chain",
-            "name": "代码评审",
-            "estimated_days": 1,
-            "after_task": "task_3",
-            "before_tasks": ["task_5"]
-        }
-    },
-    "delete_node_and_reconnect": {
-        "description": "删除节点，将其上下游重新连接",
+    "delete_node": {
+        "description": "永久删除一个任务节点。系统会自动清理所有关联的边。",
         "params": ["node_id"],
         "example": {
-            "intent": "delete_node_and_reconnect",
+            "intent": "delete_node",
             "node_id": "task_4"
         }
     },
-    "connect_nodes": {
-        "description": "在已有节点间建立依赖关系",
-        "params": ["source_id", "target_ids"],
+    "edit_node": {
+        "description": "修改已有节点的属性。只填需要修改的字段，未填的字段保持不变。",
+        "params": ["node_id", "name", "progress", "status", "estimated_days",
+                    "confidence", "resources", "notes", "pre_dependencies", "tags"],
         "example": {
-            "intent": "connect_nodes",
-            "source_id": "task_1",
-            "target_ids": ["task_2", "task_3"]
+            "intent": "edit_node",
+            "node_id": "task_1",
+            "name": "数据库表结构设计",
+            "progress": 100,
+            "status": "completed"
+        }
+    },
+    "add_edge": {
+        "description": "添加一条依赖边（source → target）。表示 target 任务必须等 source 任务完成后才能开始。",
+        "params": ["source", "target"],
+        "example": {
+            "intent": "add_edge",
+            "source": "task_1",
+            "target": "task_2"
+        }
+    },
+    "remove_edge": {
+        "description": "移除一条依赖边。不会删除节点本身。",
+        "params": ["source", "target"],
+        "example": {
+            "intent": "remove_edge",
+            "source": "task_1",
+            "target": "task_2"
         }
     },
     "ask_user": {
-        "description": "需要用户确认或补充信息",
+        "description": "需要用户确认或补充信息。",
         "params": ["question", "options"],
         "example": {
             "intent": "ask_user",
-            "question": "新节点是否应依赖数据库设计？",
-            "options": ["是，依赖数据库设计", "否，可以并行", "依赖其他任务..."]
-        }
-    },
-    "update_progress": {
-        "description": "更新已有任务的进度或状态",
-        "params": ["updates"],
-        "example": {
-            "intent": "update_progress",
-            "updates": [
-                {"task_id": "task_1", "progress": 100, "status": "completed", "notes": "按时完成"},
-                {"task_id": "task_2", "progress": 40, "status": "in_progress", "notes": "比计划慢1天"}
-            ]
+            "question": "你想删除哪个节点？",
+            "options": ["task_3 后端API", "task_4 前端页面"]
         }
     },
 }
 
 
-# ---- 编排器：意图 → 原子操作序列 ----
+# ---- 编排器：意图 → 原子操作（1:1 映射） ----
+
+def _generate_node_id(node_map: dict) -> str:
+    """生成不重复的节点 ID"""
+    base = len(node_map) + 1
+    new_id = f"task_{base}"
+    counter = 0
+    while new_id in node_map:
+        counter += 1
+        new_id = f"task_{base}_{counter}"
+    return new_id
 
 
 def map_intent_to_ops(intent: dict, node_map: dict) -> tuple[list[AtomicOp], dict | None]:
-    """将语义意图映射为原子操作序列
+    """将语义意图映射为原子操作序列（1:1 映射，一个 intent → 一个 AtomicOp）
 
-    Args:
-        intent: {"intent": "xxx", ...params}
-        node_map: {node_id: TaskNode} 当前项目节点
+    复杂场景由 LLM 输出多个 intent，上层循环调用本函数。
 
     Returns:
-        (operations, response_extra)  # 操作列表 + 额外响应信息
+        (operations, response_extra)
     """
     intent_type = intent.get("intent", "")
 
-    if intent_type == "add_connected_node":
-        ops = _map_add_connected_node(intent, node_map)
-        return ops, None
+    if intent_type == "add_node":
+        new_id = _generate_node_id(node_map)
+        op = AtomicOp("add_node", {
+            "id": new_id,
+            "name": intent.get("name", ""),
+            "description": intent.get("description", intent.get("name", "")),
+            "estimated_days": float(intent.get("estimated_days", 3)),
+            "confidence": float(intent.get("confidence", 0.7)),
+            "pre_dependencies": intent.get("pre_dependencies", []),
+            "resources": intent.get("resources", []),
+            "notes": intent.get("notes", ""),
+        })
+        return [op], None
 
-    elif intent_type == "add_task_in_chain":
-        ops = _map_add_task_in_chain(intent, node_map)
-        return ops, None
+    elif intent_type == "delete_node":
+        nid = intent.get("node_id", "")
+        if nid and nid in node_map:
+            return [AtomicOp("delete_node", {"node_id": nid})], None
+        return [], {"action": "ask", "question": f"节点 {nid} 不存在，请确认节点ID"}
 
-    elif intent_type == "delete_node_and_reconnect":
-        ops = _map_delete_and_reconnect(intent, node_map)
-        return ops, None
+    elif intent_type == "edit_node":
+        nid = intent.get("node_id", "")
+        if nid and nid in node_map:
+            params = {"node_id": nid}
+            for key in ("name", "progress", "status", "estimated_days",
+                        "confidence", "resources", "notes", "pre_dependencies", "tags"):
+                val = intent.get(key)
+                if val is not None:
+                    params[key] = val
+            return [AtomicOp("edit_node", params)], None
+        return [], {"action": "ask", "question": f"节点 {nid} 不存在"}
 
-    elif intent_type == "connect_nodes":
-        ops = _map_connect_nodes(intent, node_map)
-        return ops, None
+    elif intent_type == "add_edge":
+        src = intent.get("source", "")
+        tgt = intent.get("target", "")
+        if src and tgt and src in node_map and tgt in node_map and src != tgt:
+            return [AtomicOp("add_edge", {"source": src, "target": tgt})], None
+        return [], None  # 静默跳过无效边
+
+    elif intent_type == "remove_edge":
+        src = intent.get("source", "")
+        tgt = intent.get("target", "")
+        if src and tgt:
+            return [AtomicOp("remove_edge", {"source": src, "target": tgt})], None
+        return [], None
 
     elif intent_type == "ask_user":
         return [], {"action": "ask", "question": intent.get("question", ""),
                      "options": intent.get("options", [])}
 
     elif intent_type == "update_progress":
+        # 兼容旧格式，映射到 edit_node
         ops = []
         for upd in intent.get("updates", []):
             tid = upd.get("task_id", "")
@@ -135,104 +172,4 @@ def map_intent_to_ops(intent: dict, node_map: dict) -> tuple[list[AtomicOp], dic
         return ops, None
 
     else:
-        # 未知意图 → 降级为直接执行原始格式
         return [], {"action": "unknown_intent", "raw": intent}
-
-
-def _generate_node_id(node_map: dict) -> str:
-    """生成不重复的节点 ID，避免 while 循环死锁"""
-    base = len(node_map) + 1
-    new_id = f"task_{base}"
-    counter = 0
-    while new_id in node_map:
-        counter += 1
-        new_id = f"task_{base}_{counter}"
-    return new_id
-
-
-def _map_add_connected_node(intent: dict, node_map: dict) -> list[AtomicOp]:
-    """add_connected_node → [add_node, add_edge, add_edge, ...]
-
-    自动过滤间接下游：如果 B 已经依赖 A，而新节点让 A 依赖它，
-    则 B 不需要直接依赖新节点（通过 A 间接可达）。
-    """
-    ops = []
-    new_id = _generate_node_id(node_map)
-
-    # 1. 添加节点
-    ops.append(AtomicOp("add_node", {
-        "id": new_id,
-        "name": intent.get("name", ""),
-        "estimated_days": float(intent.get("estimated_days", 3)),
-        "confidence": float(intent.get("confidence", 0.7)),
-        "pre_dependencies": intent.get("pre_dependencies", []),
-        "resources": intent.get("resources", []),
-        "notes": intent.get("notes", ""),
-    }))
-
-    # 2. 前向边：照单执行 LLM 指定的 downstream_deps
-    # 不设机械过滤——LLM 应自行判断直接后继，用户通过确认门把关
-    for tid in intent.get("downstream_deps", []):
-        if tid in node_map and tid != new_id:
-            ops.append(AtomicOp("add_edge", {"source": new_id, "target": tid}))
-
-    return ops
-
-
-def _map_add_task_in_chain(intent: dict, node_map: dict) -> list[AtomicOp]:
-    """在链中插入：先添加节点，再断开旧边、建立新边"""
-    ops = []
-    new_id = _generate_node_id(node_map)
-
-    # 1. 添加节点（依赖 after_task）
-    deps = [intent["after_task"]] if intent.get("after_task") in node_map else []
-    ops.append(AtomicOp("add_node", {
-        "id": new_id, "name": intent.get("name", ""),
-        "estimated_days": float(intent.get("estimated_days", 3)),
-        "confidence": float(intent.get("confidence", 0.7)),
-        "pre_dependencies": deps,
-        "resources": intent.get("resources", []), "notes": intent.get("notes", ""),
-    }))
-
-    # 2. 断开 before_tasks 对 after_task 的旧依赖，改为依赖新节点
-    after = intent.get("after_task", "")
-    for tid in intent.get("before_tasks", []):
-        if tid in node_map and after in node_map:
-            node = node_map[tid]
-            if after in node.pre_dependencies:
-                ops.append(AtomicOp("remove_edge", {"source": after, "target": tid}))
-            ops.append(AtomicOp("add_edge", {"source": new_id, "target": tid}))
-
-    return ops
-
-
-def _map_delete_and_reconnect(intent: dict, node_map: dict) -> list[AtomicOp]:
-    """删节点，上游→下游重连"""
-    ops = []
-    nid = intent.get("node_id", "")
-    if nid not in node_map:
-        return ops
-
-    node = node_map[nid]
-    downstream = [tid for tid, n in node_map.items() if nid in n.pre_dependencies]
-    upstream = node.pre_dependencies
-
-    # 1. 删除节点
-    ops.append(AtomicOp("delete_node", {"node_id": nid}))
-
-    # 2. 每个上游 → 每个下游
-    for pre in upstream:
-        for post in downstream:
-            ops.append(AtomicOp("add_edge", {"source": pre, "target": post}))
-
-    return ops
-
-
-def _map_connect_nodes(intent: dict, node_map: dict) -> list[AtomicOp]:
-    """建立依赖：source → 每个 target"""
-    ops = []
-    src = intent.get("source_id", "")
-    for tid in intent.get("target_ids", []):
-        if src in node_map and tid in node_map and src != tid:
-            ops.append(AtomicOp("add_edge", {"source": src, "target": tid}))
-    return ops

@@ -7,7 +7,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <title>bePm — AI 辅助项目排期管理</title>
-<link rel="stylesheet" href="/css/style.css">
+<link rel="stylesheet" href="/css/style.css?v=4">
 <script src="https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
 <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
 <script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
@@ -96,24 +96,29 @@
     </div>
   </aside>
 
+  <div class="splitter" id="splitter-l"></div>
+
   <!-- 中间: DAG 可视化 -->
   <main id="center-panel">
     <div id="dag-header">
       <span id="dag-title">选择或创建一个项目</span>
       <span id="dag-info"></span>
+      <span id="dag-tags"></span>
       <span id="dag-layout-msg" style="color:#ef4444;font-size:11px;margin-left:8px"></span>
     </div>
     <div id="cy-container"></div>
     <div id="dag-legend">
-      <span><span class="legend-dot" style="background:#059669"></span> 已完成</span>
-      <span><span class="legend-dot" style="background:#4f46e5"></span> 进行中</span>
-      <span><span class="legend-dot" style="background:#64748b"></span> 未开始</span>
-      <span><span class="legend-dot" style="background:#e11d48"></span> 延迟</span>
-      <span><span class="legend-dot" style="background:#d97706"></span> 阻塞</span>
-      <span><span class="legend-path"></span> 关键路径</span>
+      <span><span class="legend-dot" style="background:#0d9488"></span> 已完成</span>
+      <span><span class="legend-dot" style="background:#7c3aed"></span> 进行中</span>
+      <span><span class="legend-dot" style="background:#94a3b8"></span> 未开始</span>
+      <span><span class="legend-dot" style="background:#d97706"></span> 延迟</span>
+      <span><span class="legend-dot" style="background:#e11d48"></span> 阻塞</span>
+      <span><span class="legend-path" style="background:#0f172a"></span> 关键路径</span>
       <span style="font-size:11px;color:var(--text-muted)">★ 关键节点</span>
     </div>
   </main>
+
+  <div class="splitter" id="splitter-r"></div>
 
   <!-- 右侧: 风险与建议面板 -->
   <aside id="right-panel">
@@ -156,6 +161,8 @@
       <input type="text" id="edit-node-resources">
       <label>前置依赖（勾选依赖的任务）</label>
       <div id="edit-node-deps-list" style="max-height:150px;overflow-y:auto;border:1px solid var(--border);border-radius:4px;padding:6px"></div>
+      <label>标签（逗号分隔）</label>
+      <input type="text" id="edit-node-tags" placeholder="backend, P0, auth">
       <label>备注</label>
       <textarea id="edit-node-notes" rows="2"></textarea>
     </div>
@@ -181,9 +188,9 @@
   </div>
 </div>
 
-<script src="/js/api.js?v=16"></script>
-<script src="/js/dag.js?v=16"></script>
-<script src="/js/ws.js?v=16"></script>
-<script src="/js/app.js?v=16"></script>
+<script src="/js/api.js?v=21"></script>
+<script src="/js/dag.js?v=21"></script>
+<script src="/js/ws.js?v=21"></script>
+<script src="/js/app.js?v=21"></script>
 </body>
 </html>

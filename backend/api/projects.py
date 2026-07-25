@@ -421,6 +421,7 @@ async def get_graph(project_id: str):
             "lf_date": _fmt_date(n.lf),
             "float_days": n.float_days,
             "notes": n.notes,
+            "tags": n.tags or [],
         })
 
     edges_data = [{"source": e.source, "target": e.target} for e in project.edges]
@@ -434,6 +435,197 @@ async def get_graph(project_id: str):
         "schedule": schedule_data,
         "risks": [r.model_dump() for r in project.risks],
         "buffer": project.buffer.model_dump() if project.buffer else None,
+    }
+
+
+# ---- 标签 & 分组 ----
+
+
+@router.get("/projects/{project_id}/tags")
+async def get_tags(project_id: str):
+    """收集项目中所有节点的标签（去重排序）"""
+    project = _load_project(project_id)
+    all_tags: set[str] = set()
+    for n in project.nodes:
+        for t in (n.tags or []):
+            all_tags.add(t)
+    return {"tags": sorted(all_tags)}
+
+
+@router.get("/projects/{project_id}/grouped")
+async def get_grouped(project_id: str, tags: str = ""):
+    """按标签分组聚合——支持多 tag（逗号分隔）
+
+    聚合规则:
+      - 同一 tag 值的节点合并为一个聚合节点
+      - 多 tag 时各自独立成组
+      - 聚合节点属性由子节点子图调度计算
+      - 边按分组间关系聚合，去重
+    """
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+    if not tag_list:
+        return await get_graph(project_id)
+
+    project = _load_project(project_id)
+    from datetime import datetime, timedelta
+
+    base_date = datetime.now()
+    try:
+        base_date = datetime.fromisoformat(project.created_at)
+    except (ValueError, TypeError):
+        pass
+
+    def _fmt(offset):
+        try:
+            return (base_date + timedelta(days=float(offset))).strftime("%m/%d")
+        except Exception:
+            return str(offset)
+
+    # --- 检查冲突：有节点命中多个 tag → 拒绝执行 ---
+    conflicts: list[dict] = []
+    for n in project.nodes:
+        matching = [t for t in tag_list if t in (n.tags or [])]
+        if len(matching) > 1:
+            conflicts.append({
+                "node_id": n.id,
+                "node_name": n.name,
+                "tags": matching,
+            })
+
+    if conflicts:
+        return {
+            "nodes": [], "edges": [], "critical_path": [],
+            "schedule": None, "risks": [], "buffer": None,
+            "conflicts": conflicts,
+        }
+
+    # --- 分组 ---
+    group_ids: set[str] = set()
+    groups: dict[str, list] = {}
+    standalone: list = []
+
+    for n in project.nodes:
+        matched = False
+        for t in tag_list:
+            if t in (n.tags or []):
+                group_ids.add(n.id)
+                groups.setdefault(t, []).append(n)
+                matched = True
+                break
+        if not matched:
+            standalone.append(n)
+
+    result_nodes = []
+
+    # --- 聚合节点 ---
+    for gv, members in groups.items():
+        # 子图调度计算工期
+        from engine.scheduler import create_schedule
+        try:
+            sub_schedule = create_schedule(members, None)
+            agg_duration = sub_schedule.total_duration_days
+            agg_critical = sub_schedule.critical_path
+        except Exception:
+            agg_duration = sum(m.estimated_days for m in members)
+            agg_critical = []
+
+        # 进度加权平均
+        total_weight = sum(m.estimated_days for m in members)
+        agg_progress = (
+            sum(m.progress * m.estimated_days for m in members) / total_weight
+            if total_weight > 0 else 0
+        )
+
+        # 最差状态
+        status_order = {"blocked": 5, "delayed": 4, "in_progress": 3, "pending": 2, "completed": 1}
+        agg_status = max(members, key=lambda m: status_order.get(m.status.value, 0)).status.value
+
+        # 时间边界
+        agg_es = min((m.es for m in members if m.es is not None), default=None)
+        agg_ef = max((m.ef for m in members if m.ef is not None), default=None)
+        agg_ls = min((m.ls for m in members if m.ls is not None), default=None)
+        agg_lf = max((m.lf for m in members if m.lf is not None), default=None)
+        agg_float = (agg_ls - agg_es) if (agg_es is not None and agg_ls is not None) else None
+        agg_is_critical = any(m.is_critical for m in members)
+
+        # FO 去重
+        fo_set: set[str] = set()
+        for m in members:
+            for r in (m.resources or []):
+                fo_set.add(r)
+
+        result_nodes.append({
+            "id": f"grp_{gv}",
+            "name": gv,
+            "progress": round(agg_progress, 1),
+            "status": agg_status,
+            "is_critical": agg_is_critical,
+            "estimated_days": round(agg_duration, 1),
+            "confidence": round(sum(m.confidence for m in members) / len(members), 2),
+            "resources": sorted(fo_set),
+            "es": agg_es, "ef": agg_ef, "ls": agg_ls, "lf": agg_lf,
+            "es_date": _fmt(agg_es) if agg_es is not None else None,
+            "ef_date": _fmt(agg_ef) if agg_ef is not None else None,
+            "ls_date": _fmt(agg_ls) if agg_ls is not None else None,
+            "lf_date": _fmt(agg_lf) if agg_lf is not None else None,
+            "float_days": agg_float,
+            "is_group": True,
+            "notes": f"{len(members)} 个子节点",
+            "tags": list(tag_list),
+            "children": [m.id for m in members],
+        })
+
+    # --- 独立节点 ---
+    for n in standalone:
+        result_nodes.append({
+            "id": n.id, "name": n.name,
+            "progress": n.progress, "status": n.status.value,
+            "is_critical": n.is_critical,
+            "estimated_days": n.estimated_days, "confidence": n.confidence,
+            "resources": n.resources,
+            "es": n.es, "ef": n.ef, "ls": n.ls, "lf": n.lf,
+            "es_date": _fmt(n.es) if n.es is not None else None,
+            "ef_date": _fmt(n.ef) if n.ef is not None else None,
+            "ls_date": _fmt(n.ls) if n.ls is not None else None,
+            "lf_date": _fmt(n.lf) if n.lf is not None else None,
+            "float_days": n.float_days,
+            "notes": n.notes, "tags": n.tags or [],
+        })
+
+    # --- 聚合边 ---
+    result_edges = []
+    seen_edges: set[tuple[str, str]] = set()
+
+    all_node_ids = {n["id"] for n in result_nodes}
+    # 建立 id → group 的映射
+    id_to_group: dict[str, str] = {}
+    for n in result_nodes:
+        for cid in n.get("children", []):
+            id_to_group[cid] = n["id"]
+        id_to_group[n["id"]] = n["id"]
+
+    for e in project.edges:
+        src_grp = id_to_group.get(e.source, e.source)
+        tgt_grp = id_to_group.get(e.target, e.target)
+        if src_grp == tgt_grp:
+            continue  # 组内边，去掉
+        key = (src_grp, tgt_grp)
+        if key not in seen_edges and src_grp in all_node_ids and tgt_grp in all_node_ids:
+            seen_edges.add(key)
+            result_edges.append({"source": src_grp, "target": tgt_grp})
+
+    # --- 关键路径（聚合后重新算） ---
+    # 对聚合节点简单识别：float ≈ 0 的就是关键
+    cp = [n["id"] for n in result_nodes if n.get("is_critical")]
+
+    return {
+        "nodes": result_nodes,
+        "edges": result_edges,
+        "critical_path": cp,
+        "schedule": None,
+        "risks": [r.model_dump() for r in project.risks],
+        "buffer": project.buffer.model_dump() if project.buffer else None,
+        "conflicts": conflicts,
     }
 
 
@@ -504,6 +696,13 @@ def _build_plan_text(ops: list, node_map: dict) -> str:
                 changes.append(f"进度 → {p['progress']}%")
             if "status" in p and p["status"] is not None:
                 changes.append(f"状态 → {p['status']}")
+            if "estimated_days" in p and p["estimated_days"] is not None:
+                changes.append(f"工期 → {p['estimated_days']}天")
+            if "confidence" in p and p["confidence"] is not None:
+                changes.append(f"置信度 → {p['confidence']}")
+            if "resources" in p and p["resources"] is not None:
+                resources_str = ", ".join(p["resources"]) if isinstance(p["resources"], list) else str(p["resources"])
+                changes.append(f"FO →「{resources_str}」")
             if "notes" in p and p["notes"] is not None:
                 notes_preview = p["notes"][:40] + ("..." if len(p["notes"]) > 40 else "")
                 changes.append(f"备注 →「{notes_preview}」")
@@ -631,27 +830,32 @@ async def process_command(project_id: str, req: AddNodeRequest):
                 }
                 for n in project.nodes
             ]
-            intent = parse_single_task(
+            intents = parse_single_task(
                 req.description, existing_summary, project.messages
             )
+            # 兼容旧格式（单对象 → 包装为数组）
+            if isinstance(intents, dict):
+                intents = [intents]
 
             project.messages.append({"role": "user", "content": req.description})
-            project.messages.append({"role": "assistant", "content": f"[意图] {json.dumps(intent, ensure_ascii=False)}"})
+            project.messages.append({"role": "assistant", "content": f"[意图] {json.dumps(intents, ensure_ascii=False)}"})
 
-            # ---- 编排层：意图 → 原子操作序列 ----
+            # ---- 编排层：意图数组 → 原子操作序列 ----
             from engine.intents import map_intent_to_ops, AtomicOp
-            ops, extra = map_intent_to_ops(intent, node_map)
-
-            if extra and extra.get("action") == "ask":
-                project.messages.append({"role": "assistant", "content": f"[待确认] {extra['question']}"})
-                _save_project(project)
-                return {
-                    "action": "ask",
-                    "question": extra["question"],
-                    "options": extra.get("options", []),
-                    "project": project.model_dump(),
-                    "stage": "parsed",
-                }
+            ops = []
+            for intent in intents:
+                intent_ops, extra = map_intent_to_ops(intent, node_map)
+                ops.extend(intent_ops)
+                if extra and extra.get("action") == "ask":
+                    project.messages.append({"role": "assistant", "content": f"[待确认] {extra['question']}"})
+                    _save_project(project)
+                    return {
+                        "action": "ask",
+                        "question": extra["question"],
+                        "options": extra.get("options", []),
+                        "project": project.model_dump(),
+                        "stage": "parsed",
+                    }
 
             # ---- 确认门：所有操作先展示计划，用户确认后再执行 ----
             if ops and not req.confirmed:
@@ -716,7 +920,7 @@ async def process_command(project_id: str, req: AddNodeRequest):
                 tid = op.params.get("node_id", "")
                 if tid in node_map:
                     node = node_map[tid]
-                    for k in ["name", "estimated_days", "confidence", "resources", "notes", "pre_dependencies", "progress"]:
+                    for k in ["name", "estimated_days", "confidence", "resources", "notes", "pre_dependencies", "progress", "tags"]:
                         if k in op.params and op.params[k] is not None:
                             setattr(node, k, op.params[k])
                     if "status" in op.params and op.params["status"]:

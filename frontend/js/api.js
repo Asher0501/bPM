@@ -36,6 +36,8 @@ const API = (() => {
 
     // 图数据
     getGraph(id)       { return request("GET", `/api/projects/${id}/graph`); },
+    getTags(id)        { return request("GET", `/api/projects/${id}/tags`); },
+    getGrouped(id, tags){ return request("GET", `/api/projects/${id}/grouped?tags=${encodeURIComponent(tags)}`); },
 
     // 编辑节点
     editTask(projectId, taskId, updates) {

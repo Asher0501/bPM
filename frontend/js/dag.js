@@ -7,17 +7,34 @@ var DAGView = (function () {
     return typeof cytoscape !== "undefined";
   }
 
-  function _doLayout() {
+  function _buildLabel(n) {
+    var name = n.name || n.id || "";
+    if (n.is_group && n.children) {
+      var c = Array.isArray(n.children) ? n.children.length : (String(n.children||"").split(",").filter(Boolean).length);
+      if (c > 0) name = name + " [" + c + "]";
+    }
+    var pct = n.progress || 0;
+    if (pct > 0 && pct < 100) name = name + "  " + pct + "%";
+    // 日期行
+    var es = n.es_date || "";
+    var ef = n.ef_date || "";
+    var dateStr = (es || ef) ? (es + (ef ? " → " + ef : "")) : "";
+    return name + (dateStr ? "\n" + dateStr : "");
+  }
+
+  function _doLayout(animate) {
     if (!_cy) return;
     var dagMsg = document.getElementById("dag-layout-msg");
+    var opts = { name: "dagre", rankDir: "LR", spacingFactor: 1.3, nodeDimensionsIncludeLabels: true, rankSep: 60, nodeSep: 30 };
+    if (animate) { opts.animate = true; opts.animationDuration = 500; opts.animationEasing = "ease-in-out-cubic"; }
     try {
-      _cy.layout({ name: "dagre", rankDir: "LR", spacingFactor: 1.6, nodeDimensionsIncludeLabels: true, rankSep: 80, nodeSep: 40 }).run();
+      _cy.layout(opts).run();
       if (dagMsg) dagMsg.textContent = "";
     } catch (e) {
       console.warn("[DAG] dagre failed:", e.message);
       if (dagMsg) dagMsg.textContent = "dagre不可用，使用备用布局";
       try {
-        _cy.layout({ name: "breadthfirst", directed: true, spacingFactor: 1.3 }).run();
+        _cy.layout({ name: "breadthfirst", directed: true, spacingFactor: 1.3, animate: animate, animationDuration: 500 }).run();
         if (dagMsg) dagMsg.textContent = "";
       } catch (e2) {
         console.error("[DAG] all layouts failed:", e2.message);
@@ -47,33 +64,58 @@ var DAGView = (function () {
             label: "data(label)",
             "text-valign": "center",
             "text-halign": "center",
-            "font-size": "10px",
+            "font-size": "14px",
             color: "#fff",
-            width: 172,
-            height: 52,
-            "padding": "6px",
+            width: 184,
+            height: 54,
+            "padding": "10px 16px",
             "border-width": 0,
             "font-weight": "600",
             "text-wrap": "wrap",
-            "text-max-width": "158px",
+            "text-max-width": "166px",
             "text-justification": "center",
             "background-opacity": 1,
+            "text-margin-y": 3,
+            "text-outline-width": 0.3,
+            "text-outline-color": "rgba(0,0,0,0.25)",
           },
         },
         {
           selector: "node.critical",
-          style: { "border-width": 3, "border-color": "#dc2626", width: 180, height: 58 },
-        },
-        { selector: "node.status-completed", style: { "background-color": "#059669" } },
-        { selector: "node.status-in_progress", style: { "background-color": "#4f46e5" } },
-        { selector: "node.status-pending", style: { "background-color": "#64748b" } },
-        { selector: "node.status-delayed", style: { "background-color": "#e11d48" } },
-        { selector: "node.status-blocked", style: { "background-color": "#d97706" } },
-        {
-          selector: "edge", style: { width: 2, "line-color": "#94a3b8", "target-arrow-color": "#94a3b8", "target-arrow-shape": "triangle", "curve-style": "bezier", "arrow-scale": 1.2 },
+          style: {
+            width: 194, height: 60,
+            "border-width": 4,
+            "border-color": "#0f172a",
+            "border-style": "solid",
+          },
         },
         {
-          selector: "edge.critical", style: { width: 3, "line-color": "#e11d48", "target-arrow-color": "#e11d48" },
+          selector: "node.is-group",
+          style: {
+            "border-width": 2.5,
+            "border-color": "#818cf8",
+            "border-style": "dashed",
+            "padding": "12px 18px",
+          },
+        },
+        {
+          selector: "node.is-group.critical",
+          style: {
+            "border-width": 4,
+            "border-color": "#0f172a",
+            "border-style": "solid",
+          },
+        },
+        { selector: "node.status-completed", style: { "background-color": "#0d9488" } },
+        { selector: "node.status-in_progress", style: { "background-color": "#7c3aed" } },
+        { selector: "node.status-pending", style: { "background-color": "#94a3b8" } },
+        { selector: "node.status-delayed", style: { "background-color": "#d97706" } },
+        { selector: "node.status-blocked", style: { "background-color": "#e11d48" } },
+        {
+          selector: "edge", style: { width: 2, "line-color": "#94a3b8", "target-arrow-color": "#94a3b8", "target-arrow-shape": "triangle", "curve-style": "bezier", "arrow-scale": 1.1 },
+        },
+        {
+          selector: "edge.critical", style: { width: 2.5, "line-color": "#0f172a", "target-arrow-color": "#0f172a" },
         },
       ],
     });
@@ -92,43 +134,36 @@ var DAGView = (function () {
   }
 
   function render(graphData) {
-    // 每次 render 都重新创建，避免状态污染
-    if (_cy) { try { _cy.destroy(); } catch(e){}; _cy = null; }
-    init();
-    if (!_cy) return;
-
     var nodes = graphData.nodes || [];
     var edges = graphData.edges || [];
     var critical_path = graphData.critical_path || [];
     var cp = {};
     critical_path.forEach(function (nid) { cp[nid] = true; });
 
-    // 添加节点
-    nodes.forEach(function (n) {
-      var resources = (n.resources || []).filter(Boolean);
-      var fo = resources.length > 0 ? resources.join(",") : "";
-      var pct = (n.progress > 0 && n.progress < 100) ? ("  " + n.progress + "%") : "";
-      var nameStr = n.name || n.id;
-      var nameLine = nameStr.length > 18 ? nameStr.substring(0, 16) + "…" : nameStr;
-      var sep = "─".repeat(Math.min(nameStr.length, 16));
-      var foLine = fo ? ("FO: " + fo + pct) : (pct ? ("进度: " + n.progress + "%") : "");
-      var esStr = n.es_date || ("D+" + (n.es != null ? n.es : "?"));
-      var efStr = n.ef_date || ("D+" + (n.ef != null ? n.ef : "?"));
-      var dateLine = esStr + " → " + efStr;
-      if (n.is_critical) dateLine += " ★";
-      var label = nameLine + "\n" + sep + "\n" + foLine + "\n" + dateLine;
+    // 已有实例 → 增量更新（平滑动画）
+    if (_cy) {
+      _updateGraph(nodes, edges, cp, graphData);
+      return;
+    }
 
+    // 首次渲染 → 完整创建
+    init();
+    if (!_cy) return;
+
+    nodes.forEach(function (n) {
       _cy.add({
         group: "nodes",
         data: {
-          id: n.id, label: label, name: n.name, progress: n.progress,
+          id: n.id, label: _buildLabel(n), name: n.name, progress: n.progress,
           status: n.status, estimatedDays: n.estimated_days, confidence: n.confidence,
           isCritical: n.is_critical, floatDays: n.float_days,
           es: n.es, ef: n.ef, ls: n.ls, lf: n.lf,
           esDate: n.es_date, efDate: n.ef_date, lsDate: n.ls_date, lfDate: n.lf_date,
           resources: (n.resources || []).join(", "), notes: n.notes || "",
+          tags: (n.tags || []).join(", "), children: (n.children || []).join(", "),
+          is_group: n.is_group || false,
         },
-        classes: ("status-" + n.status + (n.is_critical ? " critical" : "")).trim(),
+        classes: ("status-" + n.status + (n.is_critical ? " critical" : "") + (n.is_group ? " is-group" : "")).trim(),
       });
     });
 
@@ -149,6 +184,86 @@ var DAGView = (function () {
     setTimeout(function () { if (_cy) _cy.fit(40); }, 400);
   }
 
+  function _updateGraph(nodes, edges, cp, graphData) {
+    // 构建新旧 ID 集合
+    var newIds = {};
+    nodes.forEach(function (n) { newIds[n.id] = true; });
+    var newEdges = {};
+    edges.forEach(function (e) { newEdges[e.source + "->" + e.target] = true; });
+
+    // 1. 移除不存在的元素
+    _cy.remove(_cy.nodes().filter(function (n) { return !newIds[n.id()]; }));
+    _cy.remove(_cy.edges().filter(function (e) {
+      return !newEdges[e.data("source") + "->" + e.data("target")];
+    }));
+
+    // 2. 更新已有节点 / 添加新节点
+    nodes.forEach(function (n) {
+      var existing = _cy.getElementById(n.id);
+      if (existing.length > 0) {
+        // 更新
+        existing.data("label", _buildLabel(n));
+        existing.data("name", n.name);
+        existing.data("progress", n.progress);
+        existing.data("status", n.status);
+        existing.data("isCritical", n.is_critical);
+        existing.data("resources", (n.resources || []).join(", "));
+        existing.data("notes", n.notes || "");
+        existing.data("tags", (n.tags || []).join(", "));
+        existing.data("children", (n.children || []).join(", "));
+        existing.data("is_group", n.is_group || false);
+        // 更新 class
+        "completed,in_progress,pending,delayed,blocked".split(",").forEach(function (s) { existing.removeClass("status-" + s); });
+        existing.addClass("status-" + n.status);
+        if (n.is_critical) existing.addClass("critical"); else existing.removeClass("critical");
+        if (n.is_group) existing.addClass("is-group"); else existing.removeClass("is-group");
+      } else {
+        // 新增节点（带 fade-in）
+        addNodeToGraph(n, cp);
+      }
+    });
+
+    // 3. 更新已有边 / 添加新边
+    edges.forEach(function (e) {
+      var eid = e.source + "->" + e.target;
+      if (_cy.getElementById(eid).length === 0) {
+        var isCrit = cp[e.source] && cp[e.target];
+        _cy.add({
+          group: "edges",
+          data: { id: eid, source: e.source, target: e.target },
+          classes: isCrit ? "critical" : "",
+        });
+      }
+    });
+
+    // 4. 动画布局
+    _doLayout(true);
+
+    // 5. 平滑 fit
+    setTimeout(function () {
+      if (_cy) _cy.animate({ fit: { eles: _cy.elements(), padding: 40 }, duration: 400, easing: "ease-in-out-cubic" });
+    }, 500);
+  }
+
+  function addNodeToGraph(n, cp) {
+    var node = _cy.add({
+      group: "nodes",
+      data: {
+        id: n.id, label: _buildLabel(n), name: n.name, progress: n.progress,
+        status: n.status, estimatedDays: n.estimated_days, confidence: n.confidence,
+        isCritical: n.is_critical, floatDays: n.float_days,
+        es: n.es, ef: n.ef, ls: n.ls, lf: n.lf,
+        esDate: n.es_date, efDate: n.ef_date, lsDate: n.ls_date, lfDate: n.lf_date,
+        resources: (n.resources || []).join(", "), notes: n.notes || "",
+        tags: (n.tags || []).join(", "), children: (n.children || []).join(", "),
+      },
+      classes: ("status-" + n.status + (n.is_critical ? " critical" : "")).trim(),
+    });
+    // fade-in
+    node.style("opacity", 0);
+    node.animate({ style: { opacity: 1 }, duration: 400, easing: "ease-in" });
+  }
+
   function updateNodeStatus(taskId, progress, status) {
     if (!_cy) return;
     var node = _cy.getElementById(taskId);
@@ -157,18 +272,7 @@ var DAGView = (function () {
     node.data("status", status);
     "completed,in_progress,pending,delayed,blocked".split(",").forEach(function (s) { node.removeClass("status-" + s); });
     node.addClass("status-" + status);
-    // rebuild label
-    var nm = node.data("name") || "";
-    var fo = node.data("resources") || "";
-    var esD = node.data("esDate"), efD = node.data("efDate");
-    var isCrit = node.data("isCritical");
-    var pct = (progress > 0 && progress < 100) ? ("  " + progress + "%") : "";
-    var nameStr = nm.length > 18 ? nm.substring(0, 16) + "…" : nm;
-    var sep = "─".repeat(Math.min(nm.length, 16));
-    var foLine = fo ? ("FO: " + fo + pct) : (pct ? ("进度: " + progress + "%") : "");
-    var dateLine = (esD || "?") + " → " + (efD || "?");
-    if (isCrit) dateLine += " ★";
-    node.data("label", nameStr + "\n" + sep + "\n" + foLine + "\n" + dateLine);
+    node.data("label", _buildLabel({ name: node.data("name"), progress: progress }));
   }
 
   function highlightCriticalPath(criticalPath) {
@@ -197,6 +301,8 @@ var DAGView = (function () {
       + "<tr><td>状态</td><td>" + (statusLabel[data.status] || data.status) + "</td></tr>"
       + "<tr><td>工期</td><td>" + data.estimatedDays + " 天</td></tr>";
     if (data.resources) rows += "<tr><td>FO</td><td>" + data.resources + "</td></tr>";
+    if (data.tags) rows += "<tr><td>标签</td><td>" + data.tags + "</td></tr>";
+    if (data.children) rows += "<tr><td>子节点</td><td>" + data.children + "</td></tr>";
     var esStr = data.esDate || ("D+" + data.es);
     var efStr = data.efDate || ("D+" + data.ef);
     var lsStr = data.lsDate || ("D+" + data.ls);

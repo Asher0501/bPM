@@ -49,6 +49,30 @@ def _call_llm(system_prompt: str, user_message: str, max_tokens: int = 32768) ->
     return result.content
 
 
+# ---- Prompt 加载：优先外部文件，代码内置为 fallback ----
+
+import os as _os
+_PROMPTS_DIR = _os.path.join(_os.path.dirname(__file__), "..", "prompts")
+
+_DEFAULTS: dict[str, str] = {}  # 代码内置 fallback
+
+
+def _load_prompt(name: str, default: str) -> str:
+    """从 prompts/{name}.md 加载 prompt，不存在则用代码内置默认值"""
+    filepath = _os.path.join(_PROMPTS_DIR, f"{name}.md")
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+        if content:
+            logger.info("从文件加载 prompt: %s", filepath)
+            return content
+    except FileNotFoundError:
+        logger.debug("prompt 文件不存在，使用内置默认: %s", filepath)
+    except Exception as e:
+        logger.warning("加载 prompt 文件失败 (%s): %s，使用内置默认", filepath, e)
+    return default
+
+
 # ---- System Prompts ----
 
 PROJECT_PARSE_PROMPT = """你是一个专业的软件项目管理助手。你的任务是将用户的项目描述解析为结构化的任务列表。
@@ -408,16 +432,22 @@ def _extract_json(text: str, schema_type: str = "intent") -> dict:
         except ValueError:
             text = text[start:].strip()
 
-    # 定位 JSON 边界
+    # 定位 JSON 边界：优先数组 [...], 其次对象 {...}
+    bracket_start = text.find("[")
+    bracket_end = text.rfind("]")
     brace_start = text.find("{")
     brace_end = text.rfind("}")
-    if brace_start == -1:
+
+    if bracket_start != -1 and bracket_end > bracket_start:
+        text = text[bracket_start:bracket_end + 1]
+    elif brace_start != -1:
+        text = text[brace_start:brace_end + 1]
+    else:
         raise JsonExtractError(
             "NO_JSON_FOUND",
-            "LLM 输出中未找到 JSON 对象（没有 {} 包裹的内容）",
+            "LLM 输出中未找到 JSON",
             text[:500],
         )
-    text = text[brace_start:brace_end + 1]
 
     # 解析 JSON
     try:
@@ -429,9 +459,13 @@ def _extract_json(text: str, schema_type: str = "intent") -> dict:
             text[:500],
         )
 
-    # Schema 校验 — 仅对意图型输出（含 "intent" 字段）执行
-    if schema_type == "intent" or "intent" in result:
-        errors = _validate_intent_schema(result)
+    # Schema 校验 — 支持数组和单对象
+    if schema_type == "intent":
+        items = result if isinstance(result, list) else [result]
+        errors = []
+        for item in items:
+            if isinstance(item, dict) and "intent" in item:
+                errors.extend(_validate_intent_schema(item))
         if errors:
             raise JsonExtractError(
                 "SCHEMA_ERROR",
@@ -454,21 +488,25 @@ class JsonExtractError(Exception):
 # ---- Schema 定义 ----
 
 INTENT_SCHEMA = {
-    "add_connected_node": {
+    "add_node": {
         "required": ["intent", "name", "estimated_days"],
         "types": {"estimated_days": (int, float), "confidence": (int, float),
-                   "pre_dependencies": list, "downstream_deps": list},
+                   "pre_dependencies": list, "resources": list, "notes": str},
     },
-    "connect_nodes": {
-        "required": ["intent", "source_id", "target_ids"],
-        "types": {"target_ids": list},
-    },
-    "add_task_in_chain": {
-        "required": ["intent", "name", "estimated_days", "after_task", "before_tasks"],
-        "types": {"before_tasks": list},
-    },
-    "delete_node_and_reconnect": {
+    "delete_node": {
         "required": ["intent", "node_id"],
+    },
+    "edit_node": {
+        "required": ["intent", "node_id"],
+        "types": {"progress": (int, float), "estimated_days": (int, float),
+                   "confidence": (int, float), "pre_dependencies": list,
+                   "resources": list},
+    },
+    "add_edge": {
+        "required": ["intent", "source", "target"],
+    },
+    "remove_edge": {
+        "required": ["intent", "source", "target"],
     },
     "ask_user": {
         "required": ["intent", "question"],
@@ -551,14 +589,20 @@ downstream_deps 只填**直接后继**（新节点的紧后任务），不填间
 
 # ---- 翻译层 ----
 
-TRANSLATION_PROMPT = """你是翻译层。你的唯一任务是把"意图描述"翻译成符合以下 Schema 的标准化 JSON。
+TRANSLATION_PROMPT = """你是翻译层。把"意图描述"翻译成 DAG 原子操作序列。
 
-规则：
-1. **只输出一行合法的 JSON**，不要解释、不要 markdown 代码块、不要加任何前缀或后缀文字。输出的第一个字符必须是 `{`，最后一个字符必须是 `}`
-2. JSON 使用标准的单个花括号 `{` `}` 作为对象边界，JSON 字符串必须用双引号 `"`，禁止使用单引号
-3. 字段名必须完全匹配 Schema 中定义的 intent 类型
-4. 从意图描述中提取具体值填入对应字段，不要编造
-5. 输出必须是 `json.loads()` 可以直接解析的标准 JSON，末尾不要有多余的逗号
+## 规则
+1. **输出 JSON 数组** `[{...}, {...}]`，即使只有一个操作也用数组包裹
+2. 输出的第一个字符必须是 `[`，最后一个字符必须是 `]`
+3. JSON 字符串用双引号 `"`，禁止单引号，末尾不要有多余逗号
+4. 从意图描述中提取具体值，不要编造不存在的 task_id
+
+## ★ 复杂场景 = 多个原子操作组合
+你只有 5 种原子操作（+ ask_user）。复杂场景通过多个操作组合实现：
+- 「在 A 和 B 之间插入 C」→ [add_node(C,pre=[A]), remove_edge(A,B), add_edge(A,C), add_edge(C,B)]
+- 「批量改名」→ [edit_node(node_id,name), edit_node(node_id,name), ...]
+- 「替换节点」→ [delete_node(X), add_node(Y), add_edge(前驱,Y), add_edge(Y,后继)]
+- 「只改进度/状态/备注」→ [edit_node(node_id,progress,status)]
 
 ---
 {SCHEMA_DEF}
@@ -566,135 +610,116 @@ TRANSLATION_PROMPT = """你是翻译层。你的唯一任务是把"意图描述"
 
 ## 输出示例
 
-只改名（最常见的批量操作，用 update_progress 的 name 字段）:
-{"intent": "update_progress", "updates": [{"task_id": "task_1", "name": "数据库设计"}, {"task_id": "task_2", "name": "API设计"}]}
+改名:
+[{"intent": "edit_node", "node_id": "task_2", "name": "后端API开发"}]
 
-更新进度:
-{"intent": "update_progress", "updates": [{"task_id": "task_1", "progress": 100, "status": "completed"}]}
+批量改名:
+[{"intent": "edit_node", "node_id": "task_1", "name": "数据库设计"}, {"intent": "edit_node", "node_id": "task_2", "name": "API设计"}]
 
-新增节点:
-{"intent": "add_connected_node", "name": "代码评审", "estimated_days": 2, "confidence": 0.8, "pre_dependencies": ["task_3"], "downstream_deps": ["task_5"], "resources": ["后端开发"], "notes": "放在API开发之后、测试之前"}
+改进度:
+[{"intent": "edit_node", "node_id": "task_1", "progress": 100, "status": "completed"}]
 
-在链中插入:
-{"intent": "add_task_in_chain", "name": "代码评审", "estimated_days": 2, "after_task": "task_3", "before_tasks": ["task_5"]}
+新增节点（孤节点，后续加边）:
+[{"intent": "add_node", "name": "代码评审", "estimated_days": 2, "pre_dependencies": ["task_3"], "resources": ["后端开发"]}]
 
-删除节点（永久移除，不会创建替代节点）:
-{"intent": "delete_node_and_reconnect", "node_id": "task_4"}
+在链中插入（新增 + 断旧边 + 建新边）:
+[{"intent": "add_node", "name": "代码评审", "estimated_days": 2, "pre_dependencies": ["task_3"]}, {"intent": "remove_edge", "source": "task_3", "target": "task_5"}, {"intent": "add_edge", "source": "task_3", "target": "task_new"}, {"intent": "add_edge", "source": "task_new", "target": "task_5"}]
 
-连接节点:
-{"intent": "connect_nodes", "source_id": "task_1", "target_ids": ["task_2", "task_3"]}
+删除节点:
+[{"intent": "delete_node", "node_id": "task_4"}]
 
-反问用户:
-{"intent": "ask_user", "question": "你想删除哪个节点？", "options": ["task_3 后端API", "task_4 前端页面"]}
+添加依赖:
+[{"intent": "add_edge", "source": "task_1", "target": "task_2"}]
+
+移除依赖:
+[{"intent": "remove_edge", "source": "task_3", "target": "task_5"}]
+
+反问:
+[{"intent": "ask_user", "question": "你想删除哪个节点？", "options": ["task_3", "task_4"]}]
 """
 
 
+# ---- 从外部文件覆盖 prompt（文件存在则用文件内容，否则保留内置默认） ----
+
+PROJECT_PARSE_PROMPT = _load_prompt("project_parse", PROJECT_PARSE_PROMPT)
+PROGRESS_PARSE_PROMPT = _load_prompt("progress_parse", PROGRESS_PARSE_PROMPT)
+RISK_ANALYSIS_PROMPT = _load_prompt("risk_analysis", RISK_ANALYSIS_PROMPT)
+INTENT_UNDERSTAND_PROMPT = _load_prompt("intent_understand", INTENT_UNDERSTAND_PROMPT)
+TRANSLATION_PROMPT = _load_prompt("translation", TRANSLATION_PROMPT)
+
+
 def _build_schema_for_translation() -> str:
-    """构建翻译层所需的 Schema 描述文本（含精确的使用场景指引）"""
+    """构建翻译层所需的 Schema 描述文本——纯原子操作"""
     lines = []
 
-    # ---- update_progress ----
-    lines.append("## update_progress — 修改已有节点（进度/状态/名称/备注/资源等）")
+    lines.append("## 核心规则")
     lines.append("")
-    lines.append("**★ 这是修改已有节点的唯一方式。任何对已有节点的字段变更都用这个 intent。**")
-    lines.append("")
-    lines.append("### 适用场景（必须用 update_progress）")
-    lines.append("- 更新进度: 「task_3 完成了 70%」")
-    lines.append("- 改名: 「把 task_2 改成中文名」「重命名 task_1 为 xxx」")
-    lines.append("- 改备注: 「给 task_5 加个备注」")
-    lines.append("- 改状态: 「task_4 已阻塞」")
-    lines.append("- 批量操作: 「把所有节点名翻译成中文」→ updates 数组包含多个元素")
-    lines.append("")
-    lines.append("### 禁止（绝对不要用 delete_node_and_reconnect 来实现改名）")
-    lines.append("- ❌ 用户要改名 → 不要删除再新建！直接用 update_progress 的 name 字段")
-    lines.append("- ❌ 用户要替换节点 → 仍然是 update_progress 改名，不是删除重建")
-    lines.append("")
-    lines.append("### 字段")
-    lines.append("updates 数组中每个元素可包含以下字段（除 task_id 外均为可选，只填需要改的字段）:")
-    lines.append('  task_id (必填, string): 任务ID，如 "task_1"')
-    lines.append("  name (可选, string): 新的任务名称（用于重命名/翻译）")
-    lines.append("  progress (可选, number): 完成进度 0-100")
-    lines.append("  status (可选, string): pending | in_progress | completed | delayed | blocked")
-    lines.append("  notes (可选, string): 备注信息")
-    lines.append("")
-    lines.append("### 示例")
-    lines.append('  只改名: {"intent":"update_progress","updates":[{"task_id":"task_2","name":"后端API开发"}]}')
-    lines.append('  只改进度: {"intent":"update_progress","updates":[{"task_id":"task_1","progress":100,"status":"completed"}]}')
-    lines.append('  批量改名: {"intent":"update_progress","updates":[{"task_id":"task_1","name":"数据库设计"},{"task_id":"task_2","name":"API设计"}]}')
+    lines.append("**这是 DAG 拓扑的原子操作层。复杂场景用多个原子操作组合完成。**")
+    lines.append("例如「在 A 和 B 之间插入新节点 C」= add_node(C) + remove_edge(A,B) + add_edge(A,C) + add_edge(C,B)")
+    lines.append("例如「批量改名」= 多个 edit_node")
+    lines.append("例如「替换节点」= delete_node + add_node + add_edge × N")
     lines.append("")
 
-    # ---- add_connected_node ----
-    lines.append("## add_connected_node — 新增节点并连接")
+    # ---- add_node ----
+    lines.append("## add_node — 新增节点")
+    lines.append("创建一个新任务节点。可选 pre_dependencies 指定前驱。")
+    lines.append("如需断开旧边+建新边，配合 remove_edge + add_edge。")
     lines.append("")
-    lines.append("### 适用场景")
-    lines.append("- 用户明确说「新增一个任务/节点 XXX」且描述了它和已有节点的关系")
-    lines.append("")
-    lines.append("### 禁止")
-    lines.append("- ❌ 不要用于修改已有节点（改名/改进度/改状态 → 用 update_progress）")
-    lines.append("- ❌ 不要用于替换已有节点（替换 = 改名 + 可能改工期 → 用 update_progress）")
-    lines.append("")
-    lines.append("### 字段")
-    lines.append("  name (必填, string): 任务名称")
-    lines.append("  estimated_days (必填, number): 工期天数")
-    lines.append("  confidence (可选, number): 估时置信度 0.0-1.0，默认0.7")
-    lines.append("  pre_dependencies (可选, string[]): 前驱节点ID列表")
-    lines.append("  downstream_deps (必填, string[]): 直接后继节点ID列表（只填紧后任务！）")
-    lines.append("  resources (可选, string[]): 特性Owner（负责该任务的人员）")
-    lines.append("  notes (可选, string): 备注")
+    lines.append("字段: name(必填), estimated_days(必填), confidence(0-1), pre_dependencies(数组), resources(数组), notes")
+    lines.append('示例: {"intent":"add_node","name":"代码评审","estimated_days":2,"pre_dependencies":["task_3"],"resources":["后端"],"notes":"在task_3和task_5之间"}')
     lines.append("")
 
-    # ---- add_task_in_chain ----
-    lines.append("## add_task_in_chain — 在依赖链中插入任务")
+    # ---- delete_node ----
+    lines.append("## delete_node — 删除节点")
+    lines.append("永久删除一个节点，系统自动清理关联边。")
     lines.append("")
-    lines.append("### 适用场景")
-    lines.append("- 用户想在两个已有任务之间插入一个新步骤")
-    lines.append("")
-    lines.append("### 字段")
-    lines.append("  name (必填, string): 任务名称")
-    lines.append("  estimated_days (必填, number): 工期天数")
-    lines.append("  after_task (必填, string): 新任务的前驱节点ID")
-    lines.append("  before_tasks (必填, string[]): 新任务的后继节点ID列表")
+    lines.append("字段: node_id(必填)")
+    lines.append('示例: {"intent":"delete_node","node_id":"task_4"}')
     lines.append("")
 
-    # ---- delete_node_and_reconnect ----
-    lines.append("## delete_node_and_reconnect — 永久删除节点（不会创建替代节点！）")
+    # ---- edit_node ----
+    lines.append("## edit_node — 修改节点")
+    lines.append("修改已有节点的任意字段。只填需要改的字段，其余保持不变。")
+    lines.append("这是改名/改进度/改状态/改备注/改依赖的唯一方式。")
+    lines.append("支持 pre_dependencies 字段直接替换依赖列表。")
     lines.append("")
-    lines.append("**★ 警告: 此操作只做删除+重连，不会创建新节点。节点会被永久移除。**")
-    lines.append("")
-    lines.append("### 适用场景（仅以下情况）")
-    lines.append("- 用户明确说「删除/去掉/移除 task_X」且不需要替代")
-    lines.append("- 取消某个不需要的步骤")
-    lines.append("")
-    lines.append("### 禁止（绝对不要用）")
-    lines.append("- ❌ 改名 → 用 update_progress 的 name 字段")
-    lines.append("- ❌ 替换节点 → 用 update_progress 改 name + estimated_days")
-    lines.append("- ❌ 任何需要保留节点存在的操作 → 都不是这个 intent")
-    lines.append("")
-    lines.append("### 字段")
-    lines.append("  node_id (必填, string): 要永久删除的节点ID")
+    lines.append("字段: node_id(必填), name, progress(0-100), status(pending|in_progress|completed|delayed|blocked), estimated_days, confidence, resources, notes, pre_dependencies")
+    lines.append('示例(改名): {"intent":"edit_node","node_id":"task_2","name":"后端API开发"}')
+    lines.append('示例(改进度): {"intent":"edit_node","node_id":"task_1","progress":100,"status":"completed"}')
+    lines.append('示例(批量改名): [{"intent":"edit_node","node_id":"task_1","name":"数据库设计"},{"intent":"edit_node","node_id":"task_2","name":"API设计"}]')
     lines.append("")
 
-    # ---- connect_nodes ----
-    lines.append("## connect_nodes — 建立依赖关系")
+    # ---- add_edge ----
+    lines.append("## add_edge — 添加依赖边")
+    lines.append("添加 source → target 的依赖关系（target 依赖 source）。")
     lines.append("")
-    lines.append("### 适用场景")
-    lines.append("- 在已有节点之间添加依赖边（让 B 依赖 A）")
+    lines.append("字段: source(必填), target(必填)")
+    lines.append('示例: {"intent":"add_edge","source":"task_1","target":"task_2"}')
     lines.append("")
-    lines.append("### 字段")
-    lines.append("  source_id (必填, string): 前驱节点ID")
-    lines.append("  target_ids (必填, string[]): 后继节点ID列表（这些节点将依赖 source_id）")
+
+    # ---- remove_edge ----
+    lines.append("## remove_edge — 移除依赖边")
+    lines.append("移除 source → target 的依赖关系。节点本身不受影响。")
+    lines.append("")
+    lines.append("字段: source(必填), target(必填)")
+    lines.append('示例: {"intent":"remove_edge","source":"task_3","target":"task_5"}')
     lines.append("")
 
     # ---- ask_user ----
     lines.append("## ask_user — 反问用户")
+    lines.append("信息严重不足时使用。尽量少用，能推断就直接操作。")
     lines.append("")
-    lines.append("### 适用场景")
-    lines.append("- 意图完全无法判断或信息严重不足时，向用户确认")
-    lines.append("- 注意: 如果能从上下文中确定操作，就不要反问，直接选择最合适的 intent")
+    lines.append("字段: question(必填), options(可选数组)")
+    lines.append('示例: {"intent":"ask_user","question":"你想删除哪个节点？","options":["task_3","task_4"]}')
     lines.append("")
-    lines.append("### 字段")
-    lines.append("  question (必填, string): 向用户提出的问题")
-    lines.append("  options (可选, string[]): 候选选项")
+
+    # ---- 输出格式 ----
+    lines.append("## 输出格式")
+    lines.append("**输出 JSON 数组。** 单个操作也放在数组里。复杂场景输出多个对象。")
+    lines.append("")
+    lines.append("正确: [{\"intent\":\"edit_node\",\"node_id\":\"task_1\",\"progress\":100}]")
+    lines.append("正确: [{\"intent\":\"add_node\",...},{\"intent\":\"remove_edge\",...},{\"intent\":\"add_edge\",...}]")
+    lines.append("错误: {\"intent\":\"edit_node\",...}  ← 单个也要用数组包裹")
 
     return "\n".join(lines)
 
@@ -888,8 +913,9 @@ def parse_single_task(
 
         try:
             result = _extract_json(raw_output, schema_type="intent")
-            logger.info("parse_single_task 成功: intent=%s intent_nl=%.100s", result.get("intent"), intent_nl)
-            return result
+            intents_list = result if isinstance(result, list) else [result]
+            logger.info("parse_single_task 成功: %d intent(s) intent_nl=%.100s", len(intents_list), intent_nl)
+            return intents_list
         except JsonExtractError as e:
             last_error = e
             if attempt < max_retries - 1:

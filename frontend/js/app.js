@@ -103,6 +103,7 @@
   function showNewProjectPanel() {
     // 断开当前项目
     currentProjectId = null;
+    _activeTags = [];
     try { WSClient.disconnect(); } catch (e) { /* ok */ }
 
     // 切换面板
@@ -335,6 +336,7 @@
       renderBuffer(project.buffer, project.schedule);
       renderNodeList(project);
       showNodePanel();
+      loadTags();
 
       const titleEl = $("#dag-title");
       const infoEl = $("#dag-info");
@@ -351,15 +353,67 @@
     }
   }
 
+  // ---- 标签 & 分组 ----
+
+  var _activeTags = [];
+
+  async function loadTags() {
+    if (!currentProjectId) return;
+    try {
+      var data = await API.getTags(currentProjectId);
+      var tags = data.tags || [];
+      var el = document.getElementById("dag-tags");
+      if (!el) return;
+      var html = "";
+      tags.forEach(function(t) {
+        var active = _activeTags.indexOf(t) >= 0;
+        var cls = "tag-chip" + (active ? " active" : "");
+        html += "<span class=\"" + cls + "\" onclick=\"app.toggleTag('" + escapeHtml(t) + "')\">" + escapeHtml(t) + "</span>";
+      });
+      if (_activeTags.length > 0) {
+        html += "<span class=\"tag-chip\" onclick=\"app.clearTags()\" style=\"background:#fee2e2;border-color:#fca5a5;color:#dc2626\">✕ 清除</span>";
+      }
+      el.innerHTML = html;
+    } catch (e) { /* ok */ }
+  }
+
+  function clearTags() {
+    _activeTags = [];
+    loadTags();
+    loadAndRenderGraph(currentProjectId);
+  }
+
+  async function toggleTag(tag) {
+    var idx = _activeTags.indexOf(tag);
+    if (idx >= 0) {
+      _activeTags.splice(idx, 1);
+    } else {
+      _activeTags.push(tag);
+    }
+    loadTags();
+    await loadAndRenderGraph(currentProjectId);
+  }
+
   // ---- 图加载 ----
 
   async function loadAndRenderGraph(projectId) {
     try {
-      if (typeof DAGView === "undefined") {
-        console.warn("[App] DAGView not available, skipping DAG render");
-        return;
+      if (typeof DAGView === "undefined") return;
+      var graphData;
+      if (_activeTags.length > 0) {
+        graphData = await API.getGrouped(projectId, _activeTags.join(","));
+      } else {
+        graphData = await API.getGraph(projectId);
       }
-      const graphData = await API.getGraph(projectId);
+      if (graphData.conflicts && graphData.conflicts.length > 0) {
+        var msgs = graphData.conflicts.map(function(c) {
+          return c.node_name + " 匹配 " + c.tags.join("/");
+        });
+        showToast("无法聚合: " + msgs.join("; ") + "，请取消其中一个 tag", true);
+        _activeTags.pop();  // 回退最后一个 tag
+        loadTags();
+        return;  // 不渲染，保留当前图
+      }
       DAGView.render(graphData);
       setTimeout(() => DAGView.fit(), 400);
     } catch (err) {
@@ -766,6 +820,7 @@
       document.getElementById("edit-node-days").value = node.estimated_days || 1;
       document.getElementById("edit-node-confidence").value = node.confidence || 0.8;
       document.getElementById("edit-node-resources").value = (node.resources||[]).join(", ");
+      document.getElementById("edit-node-tags").value = (node.tags||[]).join(", ");
       document.getElementById("edit-node-notes").value = node.notes || "";
 
       // 依赖勾选列表
@@ -790,6 +845,7 @@
     var conf = parseFloat(document.getElementById("edit-node-confidence").value) || 0.8;
     var resources = document.getElementById("edit-node-resources").value.split(",").map(function(s){return s.trim();}).filter(Boolean);
     var notes = document.getElementById("edit-node-notes").value.trim();
+    var tags = document.getElementById("edit-node-tags").value.split(",").map(function(s){return s.trim();}).filter(Boolean);
 
     // 收集勾选的依赖
     var checks = document.querySelectorAll("#edit-node-deps-list input[type=checkbox]");
@@ -799,7 +855,7 @@
     try {
       var data = await API.editNode(currentProjectId, _editingNodeId, {
         name: name, estimated_days: days, confidence: conf,
-        resources: resources, pre_dependencies: deps, notes: notes,
+        resources: resources, pre_dependencies: deps, notes: notes, tags: tags,
       });
       closeEditModal();
       await refreshAfterNodeChange(data.project);
@@ -861,13 +917,58 @@
     if (typeof DAGView !== "undefined") {
       await loadAndRenderGraph(project.id);
     }
-
-    // 更新标题
+    loadTags();
     var infoEl = document.getElementById("dag-info");
     if (infoEl && project.schedule) {
       infoEl.textContent = "KP " + (project.schedule.critical_path||[]).length + " nodes | " + (project.schedule.total_duration_days||0) + "d";
     }
   }
+
+  // ---- 分割条拖拽 ----
+
+  (function initSplitters() {
+    var root = document.documentElement;
+    var active = null;
+    var startX = 0;
+    var startW = 0;
+
+    function onDown(e) {
+      active = e.target;
+      active.classList.add("active");
+      startX = e.clientX;
+      var side = active.id === "splitter-l" ? "left" : "right";
+      var el = document.getElementById(side + "-panel");
+      startW = el ? el.getBoundingClientRect().width : 300;
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      e.preventDefault();
+    }
+
+    function onMove(e) {
+      if (!active) return;
+      var dx = e.clientX - startX;
+      var side = active.id === "splitter-l" ? "left" : "right";
+      var newW = Math.max(220, startW + (side === "left" ? dx : -dx));
+      root.style.setProperty("--" + side + "-width", newW + "px");
+    }
+
+    function onUp() {
+      if (!active) return;
+      active.classList.remove("active");
+      active = null;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      // 触发 cytoscape resize
+      setTimeout(function () { if (typeof DAGView !== "undefined" && DAGView.fit) DAGView.fit(); }, 100);
+    }
+
+    var sL = document.getElementById("splitter-l");
+    var sR = document.getElementById("splitter-r");
+    if (sL) sL.addEventListener("mousedown", onDown);
+    if (sR) sR.addEventListener("mousedown", onDown);
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  })();
 
   // ---- 公开 API ----
 
@@ -893,6 +994,9 @@
     confirmDeleteNode: confirmDeleteNode,
     confirmPlan: confirmPlan,
     cancelPlan: cancelPlan,
+    toggleTag: toggleTag,
+    clearTags: clearTags,
+    loadTags: loadTags,
   };
 
 })();

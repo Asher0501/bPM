@@ -43,6 +43,7 @@ class TaskNode(BaseModel):
     float_days: Optional[float] = None         # 浮动时间
     is_critical: bool = False                  # 是否在关键路径上
     notes: str = ""                            # 备注
+    tags: list[str] = []                       # 标签，如 ["backend", "P0"]
     last_progress_update: Optional[str] = None # 上次进度更新时间 (ISO格式)
 
 
@@ -122,6 +123,7 @@ class EditTaskRequest(BaseModel):
     progress: Optional[float] = None
     status: Optional[TaskStatus] = None
     notes: Optional[str] = None
+    tags: Optional[list[str]] = None
 
 
 class AddNodeRequest(BaseModel):
