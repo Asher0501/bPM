@@ -20,3 +20,4 @@ backend/data/
 
 # 审查产物
 review_output/
+*.bak
