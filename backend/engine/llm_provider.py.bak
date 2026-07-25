@@ -20,7 +20,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shlex
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -203,10 +202,6 @@ class LlmExecutor:
           {prompt}      — prompt 文本内联（短 prompt 用，Windows 有长度限制）
           {prompt_file} — prompt 写入临时文件，传文件路径（无长度限制，推荐）
           {model} {max_tokens} {system_prompt}
-
-        ⚠️ 安全说明: shell=True 用于支持命令行模板中的管道/重定向等 shell 特性。
-        当前命令来自环境变量 LLM_CLI_COMMAND，由管理员配置，不是用户输入。
-        如果后续改为接受用户输入，必须添加命令白名单校验或改用 shell=False + shlex.split()。
         """
         from config import get_env
 
@@ -239,8 +234,6 @@ class LlmExecutor:
         logger.info("CLI execute: %.300s...", cmd_str)
 
         try:
-            # shell=True 用于支持模板中的 shell 特性（管道、重定向等）
-            # 命令来源是管理员配置的环境变量，不是用户输入，风险可控
             result = subprocess.run(
                 cmd_str,
                 shell=True,

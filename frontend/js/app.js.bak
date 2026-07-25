@@ -2,18 +2,7 @@
 
 (function () {
   var currentProjectId = null;
-  var _pendingOps = null;
-  var _loadingTimer = null;
-  var _editingNodeId = null;
-  var _deletingNodeId = null;
-  var _activeTags = [];
-  var _loadingMessages = [
-    "正在阅读项目结构 \u{1F4D6}",
-    "正在琢磨依赖关系 \u{1F9E9}",
-    "正在思考怎么安排 \u{1F4A1}",
-    "正在规划任务位置 \u{1F4CD}",
-    "马上就好 \u{2728}",
-  ];
+  var _lastAddNodeDesc = "";
 
   function $(sel) { return document.querySelector(sel); }
 
@@ -21,21 +10,6 @@
     const el = document.querySelector(sel);
     if (!el) console.error("[App] Element not found:", sel);
     return el;
-  }
-
-  // ---- 安全的 HTML 转义（纯字符串替换，避免 DOM 创建开销） ----
-  var _escapeMap = {
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  };
-  function escapeHtml(text) {
-    if (typeof text !== "string") return String(text);
-    return text.replace(/[&<>"']/g, function (ch) {
-      return _escapeMap[ch] || ch;
-    });
   }
 
   // ---- 初始化 ----
@@ -381,6 +355,8 @@
 
   // ---- 标签 & 分组 ----
 
+  var _activeTags = [];
+
   async function loadTags() {
     if (!currentProjectId) return;
     try {
@@ -520,7 +496,7 @@
     } catch (err) { /* silent */ }
   }
 
-  // ---- 状态提示（始终使用 textContent 防止 XSS） ----
+  // ---- 状态提示 ----
 
   function showCreateStatus(msg, type) {
     const el = $("#create-status");
@@ -559,6 +535,14 @@
     toast._timeout = setTimeout(function () { toast.style.opacity = "0"; }, 4000);
   }
 
+  // ---- 工具 ----
+
+  function escapeHtml(text) {
+    var div = document.createElement("div");
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
   function fmtDate(isoStr) {
     if (!isoStr) return "";
     var d = new Date(isoStr);
@@ -567,6 +551,9 @@
   }
 
   // ---- 节点管理 ----
+
+  var _editingNodeId = null;
+  var _deletingNodeId = null;
 
   function showNodePanel() {
     var p = document.getElementById("panel-nodes");
@@ -577,6 +564,17 @@
     var form = document.getElementById("manual-add-form");
     if (form) form.classList.toggle("hidden");
   }
+
+  // 暂存计划，用于确认后直接执行
+  var _pendingOps = null;
+  var _loadingTimer = null;
+  var _loadingMessages = [
+    "正在阅读项目结构 \u{1F4D6}",
+    "正在琢磨依赖关系 \u{1F9E9}",
+    "正在思考怎么安排 \u{1F4A1}",
+    "正在规划任务位置 \u{1F4CD}",
+    "马上就好 \u{2728}",
+  ];
 
   function _startLoading(targetId) {
     targetId = targetId || "progress-status";
@@ -644,52 +642,31 @@
     }
   }
 
-  function _buildPlanHtml(data) {
-    var planId = "plan-" + Date.now();
-    return '<div style="margin-top:8px;padding:10px;background:#f0fdf4;border:1px solid #22c55e;border-radius:6px;font-size:12px">'
-      + '<strong>计划:</strong><br><pre style="margin:4px 0;white-space:pre-wrap;font-family:inherit">' + escapeHtml(data.plan) + '</pre>'
-      + '<button style="margin-top:6px;padding:4px 12px;background:#22c55e;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px" onclick="app.confirmPlan()">确认执行</button> '
-      + '<button style="margin-top:6px;padding:4px 12px;background:#6b7280;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px" onclick="app.cancelPlan()">取消</button>'
-      + '<div style="margin-top:6px;display:flex;gap:4px">'
-      + '<input type="text" id="' + planId + '" placeholder="或者说明怎么改..." style="flex:1;font-size:12px;padding:4px 8px;border:1px solid #d1d5db;border-radius:4px">'
-      + '<button style="font-size:12px;padding:4px 8px;background:#3b82f6;color:#fff;border:none;border-radius:4px;cursor:pointer" onclick="app.cancelPlan();var v=document.getElementById(\'' + planId + '\').value.trim();if(v){app.submitProgress(v)}">修改</button>'
-      + '</div>'
-      + '</div>';
-  }
-
-  function _buildAskHtml(data) {
-    var askId = "ask-" + Date.now();
-    var html = '<div style="margin-top:8px;padding:10px;background:#fffbeb;border:1px solid #f59e0b;border-radius:6px;font-size:13px">'
-      + '<strong>AI:</strong><br>' + escapeHtml(data.question);
-    if (data.options && data.options.length > 0) {
-      html += '<div style="margin-top:6px">'
-        + data.options.map(function(o) {
-            return '<button style="margin:2px;font-size:11px;padding:3px 8px;cursor:pointer" onclick="app.submitProgressFollowup(\'' + escapeHtml(o).replace(/'/g,"\\'") + '\')">' + escapeHtml(o) + '</button>';
-          }).join("")
-        + '</div>';
-    }
-    html += '<div style="margin-top:8px;display:flex;gap:4px">'
-      + '<input type="text" id="' + askId + '" placeholder="或者输入你的回答..." style="flex:1;font-size:12px;padding:4px 8px;border:1px solid #d1d5db;border-radius:4px">'
-      + '<button style="font-size:12px;padding:4px 8px;background:#3b82f6;color:#fff;border:none;border-radius:4px;cursor:pointer;white-space:nowrap" onclick="var v=document.getElementById(\'' + askId + '\').value.trim();if(v)app.submitProgressFollowup(v)">发送</button>'
-      + '</div>'
-      + '</div>';
-    return html;
-  }
-
   async function _handleProgressResponse(data, inputEl) {
     // 确认计划
     if (data.action === "confirm_plan") {
       _pendingOps = data.ops_summary;
-      var planHtml = _buildPlanHtml(data);
+      var planId = "plan-" + Date.now();
+      var html = "<div style=\"margin-top:8px;padding:10px;background:#f0fdf4;border:1px solid #22c55e;border-radius:6px;font-size:12px\"><strong>计划:</strong><br><pre style=\"margin:4px 0;white-space:pre-wrap;font-family:inherit\">" + escapeHtml(data.plan) + "</pre>"
+        + "<button style=\"margin-top:6px;padding:4px 12px;background:#22c55e;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px\" onclick=\"app.confirmPlan()\">确认执行</button> "
+        + "<button style=\"margin-top:6px;padding:4px 12px;background:#6b7280;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px\" onclick=\"app.cancelPlan()\">取消</button>"
+        + "<div style=\"margin-top:6px;display:flex;gap:4px\"><input type=\"text\" id=\"" + planId + "\" placeholder=\"或者说明怎么改...\" style=\"flex:1;font-size:12px;padding:4px 8px;border:1px solid #d1d5db;border-radius:4px\">"
+        + "<button style=\"font-size:12px;padding:4px 8px;background:#3b82f6;color:#fff;border:none;border-radius:4px;cursor:pointer\" onclick=\"app.cancelPlan();var v=document.getElementById('" + planId + "').value.trim();if(v){app.submitProgress(v)}\">修改</button></div></div>";
       var psEl = document.getElementById("progress-status");
-      if (psEl) { psEl.innerHTML = planHtml; psEl.className = "status-msg success"; }
+      if (psEl) { psEl.innerHTML = html; psEl.className = "status-msg success"; }
       return;
     }
     // AI 反问
     if (data.action === "ask") {
-      var askHtml = _buildAskHtml(data);
+      var askId = "ask-" + Date.now();
+      var html = "<div style=\"margin-top:8px;padding:10px;background:#fffbeb;border:1px solid #f59e0b;border-radius:6px;font-size:13px\"><strong>AI:</strong><br>" + escapeHtml(data.question);
+      if (data.options && data.options.length > 0) {
+        html += "<div style=\"margin-top:6px\">" + data.options.map(function(o) { return "<button style=\"margin:2px;font-size:11px;padding:3px 8px;cursor:pointer\" onclick=\"app.submitProgressFollowup('" + escapeHtml(o).replace(/'/g,"\\'") + "')\">" + escapeHtml(o) + "</button>"; }).join("") + "</div>";
+      }
+      html += "<div style=\"margin-top:8px;display:flex;gap:4px\"><input type=\"text\" id=\"" + askId + "\" placeholder=\"或者输入你的回答...\" style=\"flex:1;font-size:12px;padding:4px 8px;border:1px solid #d1d5db;border-radius:4px\">"
+        + "<button style=\"font-size:12px;padding:4px 8px;background:#3b82f6;color:#fff;border:none;border-radius:4px;cursor:pointer;white-space:nowrap\" onclick=\"var v=document.getElementById('" + askId + "').value.trim();if(v)app.submitProgressFollowup(v)\">发送</button></div></div>";
       var psEl = document.getElementById("progress-status");
-      if (psEl) { psEl.innerHTML = askHtml; psEl.className = "status-msg warning"; }
+      if (psEl) { psEl.innerHTML = html; psEl.className = "status-msg warning"; }
       return;
     }
     // 成功
@@ -704,7 +681,7 @@
     await submitProgress(text);
   }
 
-  // ---- 添加节点（NL 输入，保留向后兼容） ----
+  // ---- 原 addNodeNL（保留用于向后兼容，内部转发到统一入口） ----
   async function addNodeNL(optFollowUp) {
     var txt = document.getElementById("input-add-node");
     var desc = optFollowUp || (txt ? txt.value.trim() : "");
@@ -714,8 +691,12 @@
     }
     if (!currentProjectId) { showToast("请先打开项目", true); return; }
 
-    // 构建请求体 — 移除 _lastAddNodeDesc 隐式确认机制，改为显式 _pendingOps 确认
+    // 构建请求体
     var reqBody = { description: desc };
+    // 如果是确认执行，带上 confirmed 标志
+    if (optFollowUp && optFollowUp === _lastAddNodeDesc) {
+      reqBody.confirmed = true;
+    }
 
     _startLoading();
     try {
@@ -725,21 +706,46 @@
       // 处理确认计划
       if (data.action === "confirm_plan") {
         _pendingOps = data.ops_summary;
-        var planHtml = _buildPlanHtml(data);
+        var planId = 'plan-' + Date.now();
+        var planHtml = '<div style="margin-top:8px;padding:10px;background:#f0fdf4;border:1px solid #22c55e;border-radius:6px;font-size:12px">'
+          + '<strong>计划（需确认）:</strong><br><pre style="margin:4px 0;white-space:pre-wrap;font-family:inherit">' + escapeHtml(data.plan) + '</pre>'
+          + '<button style="margin-top:6px;padding:4px 12px;background:#22c55e;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px" onclick="app.confirmPlan()">确认执行</button> '
+          + '<button style="margin-top:6px;padding:4px 12px;background:#6b7280;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px" onclick="app.cancelPlan()">取消</button>'
+          + '<div style="margin-top:6px;display:flex;gap:4px">'
+          + '<input type="text" id="' + planId + '" placeholder="或者说明要怎么改..." style="flex:1;font-size:12px;padding:4px 8px;border:1px solid #d1d5db;border-radius:4px">'
+          + '<button style="font-size:12px;padding:4px 8px;background:#3b82f6;color:#fff;border:none;border-radius:4px;cursor:pointer;white-space:nowrap" onclick="app.cancelPlan();var v=document.getElementById(\'' + planId + '\').value.trim();if(v){document.getElementById(\'input-add-node\').value=v;app.addNodeNL()}">修改</button>'
+          + '</div>'
+          + '</div>';
         var asEl = document.getElementById("add-node-status");
         if (asEl) { asEl.innerHTML = planHtml; asEl.className = "status-msg success"; }
         return;
       }
 
-      // 处理 AI 反问
-      if (data.action === "ask") {
-        var askHtml = _buildAskHtml(data);
+  // 处理 AI 反问
+  if (data.action === "ask") {
+        _lastAddNodeDesc = desc;
+        var askId = 'ask-' + Date.now();
+        var questionHtml = '<div style="margin-top:8px;padding:10px;background:#fffbeb;border:1px solid #f59e0b;border-radius:6px;font-size:13px">'
+          + '<strong>AI 需要确认:</strong><br>' + escapeHtml(data.question);
+        if (data.options && data.options.length > 0) {
+          questionHtml += '<div style="margin-top:6px">'
+            + data.options.map(function(o, i) {
+                return '<button style="margin:2px;font-size:11px;padding:3px 8px;cursor:pointer" onclick="app.addNodeNL(\'' + escapeHtml(o).replace(/'/g, "\\'") + '\')">' + escapeHtml(o) + '</button>';
+              }).join("")
+            + '</div>';
+        }
+        questionHtml += '<div style="margin-top:8px;display:flex;gap:4px">'
+          + '<input type="text" id="' + askId + '" placeholder="或者输入你的回答..." style="flex:1;font-size:12px;padding:4px 8px;border:1px solid #d1d5db;border-radius:4px">'
+          + '<button style="font-size:12px;padding:4px 8px;background:#3b82f6;color:#fff;border:none;border-radius:4px;cursor:pointer;white-space:nowrap" onclick="var v=document.getElementById(\'' + askId + '\').value.trim();if(v)app.addNodeNL(v)">发送</button>'
+          + '</div>'
+          + '</div>';
         var asEl = document.getElementById("add-node-status");
-        if (asEl) { asEl.innerHTML = askHtml; asEl.className = "status-msg warning"; }
+        if (asEl) { asEl.innerHTML = questionHtml; asEl.className = "status-msg warning"; }
         return;
       }
 
       // 成功
+      _lastAddNodeDesc = "";
       if (txt) txt.value = "";
       showAddNodeStatus("搞定啦 " + data.new_node_id + " 已就位 ✅", "success");
       await refreshAfterNodeChange(data.project);

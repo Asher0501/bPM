@@ -5,6 +5,8 @@ import json
 import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
 
+from api.projects import _load_project
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -35,7 +37,7 @@ class ConnectionManager:
             try:
                 await ws.send_json(message)
             except Exception:
-                pass  # 客户端可能已断开，静默忽略
+                pass  # 客户端可能已断开
 
     async def broadcast_node_status(self, project_id: str, task_id: str,
                                      progress: float, status: str):
@@ -70,18 +72,15 @@ manager = ConnectionManager()
 @router.websocket("/ws/projects/{project_id}")
 async def ws_project(websocket: WebSocket, project_id: str):
     """订阅项目的实时更新"""
-    # 验证项目存在（延迟导入避免循环依赖）
-    from api.projects import _load_project
+    # 验证项目存在 — 只捕获 HTTPException（项目不存在时 _load_project 抛出）
     try:
         _load_project(project_id)
     except HTTPException:
         await websocket.close(code=4004, reason="Project not found")
         return
     except Exception as e:
-        # 记录真实错误原因，帮助区分"项目不存在"和"项目文件损坏"等场景
         logger.error("WebSocket 连接验证失败 (project=%s): %s", project_id, e, exc_info=True)
-        reason = f"Internal error: {type(e).__name__}"
-        await websocket.close(code=4004, reason=reason[:120])
+        await websocket.close(code=4004, reason="Internal error")
         return
 
     await manager.connect(project_id, websocket)

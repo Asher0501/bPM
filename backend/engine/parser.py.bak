@@ -7,36 +7,11 @@
 
 import json
 import logging
-import os as _os
-import re as _re
 
 from config import get_anthropic_config
 from engine.llm_provider import LlmContext, LlmExecutor
-from engine.scheduler import structural_risk_scan
 
 logger = logging.getLogger(__name__)
-
-# ---- Prompt 加载：优先外部文件，代码内置为 fallback ----
-
-_PROMPTS_DIR = _os.path.join(_os.path.dirname(__file__), "..", "prompts")
-
-_DEFAULTS: dict[str, str] = {}  # 代码内置 fallback
-
-
-def _load_prompt(name: str, default: str) -> str:
-    """从 prompts/{name}.md 加载 prompt，不存在则用代码内置默认值"""
-    filepath = _os.path.join(_PROMPTS_DIR, f"{name}.md")
-    try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            content = f.read().strip()
-        if content:
-            logger.info("从文件加载 prompt: %s", filepath)
-            return content
-    except FileNotFoundError:
-        logger.debug("prompt 文件不存在，使用内置默认: %s", filepath)
-    except Exception as e:
-        logger.warning("加载 prompt 文件失败 (%s): %s，使用内置默认", filepath, e)
-    return default
 
 
 def _get_executor() -> LlmExecutor:
@@ -45,12 +20,13 @@ def _get_executor() -> LlmExecutor:
     LLM_PROVIDER 控制执行模式（sdk/cli），默认 sdk
     LLM_SDK_TYPE  控制 SDK 后端（anthropic/openai/...），默认 anthropic
     """
-    provider = _os.environ.get("LLM_PROVIDER", "sdk").strip().lower()
+    import os
+    provider = os.environ.get("LLM_PROVIDER", "sdk").strip().lower()
     if provider not in ("sdk", "cli"):
         logger.warning("未知 LLM_PROVIDER=%s，回退为 sdk", provider)
         provider = "sdk"
 
-    sdk_type = _os.environ.get("LLM_SDK_TYPE", "anthropic").strip().lower()
+    sdk_type = os.environ.get("LLM_SDK_TYPE", "anthropic").strip().lower()
 
     return LlmExecutor(provider=provider, sdk_type=sdk_type)  # type: ignore[arg-type]
 
@@ -71,6 +47,30 @@ def _call_llm(system_prompt: str, user_message: str, max_tokens: int = 32768) ->
     executor = _get_executor()
     result = executor.execute(ctx)
     return result.content
+
+
+# ---- Prompt 加载：优先外部文件，代码内置为 fallback ----
+
+import os as _os
+_PROMPTS_DIR = _os.path.join(_os.path.dirname(__file__), "..", "prompts")
+
+_DEFAULTS: dict[str, str] = {}  # 代码内置 fallback
+
+
+def _load_prompt(name: str, default: str) -> str:
+    """从 prompts/{name}.md 加载 prompt，不存在则用代码内置默认值"""
+    filepath = _os.path.join(_PROMPTS_DIR, f"{name}.md")
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+        if content:
+            logger.info("从文件加载 prompt: %s", filepath)
+            return content
+    except FileNotFoundError:
+        logger.debug("prompt 文件不存在，使用内置默认: %s", filepath)
+    except Exception as e:
+        logger.warning("加载 prompt 文件失败 (%s): %s，使用内置默认", filepath, e)
+    return default
 
 
 # ---- System Prompts ----
@@ -287,6 +287,9 @@ def analyze_risks(project_state: dict) -> dict:
     或分析失败，自动降级到纯算法风险扫描（structural_risk_scan），
     确保用户始终能看到结构风险，而非空列表。
     """
+    import logging
+    logger = logging.getLogger(__name__)
+
     # 构建分析输入（LLM 和算法扫描共用）
     tasks_summary = []
     for node in project_state.get("nodes", []):
@@ -355,6 +358,7 @@ def analyze_risks(project_state: dict) -> dict:
         logger.error("LLM 风险分析异常 (%s), 降级到算法扫描", str(e)[:80], exc_info=True)
 
     # ---- 算法风险扫描兜底（不依赖 LLM） ----
+    from engine.scheduler import structural_risk_scan
     from models.project import TaskNode, ScheduleResult, BufferInfo
 
     nodes = []
@@ -402,11 +406,8 @@ def analyze_risks(project_state: dict) -> dict:
 
     return {"risks": algo_risks, "overall_assessment": "算法风险扫描结果（LLM 不可用）", "top_actions": []}
 
-
 def _extract_json(text: str, schema_type: str = "intent") -> dict:
     """从 LLM 响应中提取 JSON，校验 schema，校验失败则抛错供上层重试
-
-    改进的 fence 检测：支持 ```json 后跟任意文本、行尾空格等情况
 
     Args:
         text: LLM 响应文本
@@ -415,28 +416,21 @@ def _extract_json(text: str, schema_type: str = "intent") -> dict:
     """
     text = text.strip()
 
-    # 提取 ```json ... ``` 块 — 使用更稳健的正则匹配
-    # 兼容 ```json 后跟额外文本、行尾空格、Windows 换行符等情况
-    json_fence_re = _re.compile(r"```(?:json)?\s*\n?", _re.MULTILINE)
-    m = json_fence_re.search(text)
-    if m:
-        start = m.end()  # 跳过 fence 标记本身
-        end_marker = text.find("```", start)
-        if end_marker != -1:
-            text = text[start:end_marker].strip()
-        else:
+    # 提取 ```json ... ``` 块
+    if "```json" in text:
+        start = text.index("```json") + 7
+        try:
+            end = text.index("```", start)
+            text = text[start:end].strip()
+        except ValueError:
             text = text[start:].strip()
-    else:
-        # 如果没有 ```json，尝试 ``` 代码块
-        fence_re = _re.compile(r"```\s*\n?", _re.MULTILINE)
-        m = fence_re.search(text)
-        if m:
-            start = m.end()
-            end_marker = text.find("```", start)
-            if end_marker != -1:
-                text = text[start:end_marker].strip()
-            else:
-                text = text[start:].strip()
+    elif "```" in text:
+        start = text.index("```") + 3
+        try:
+            end = text.index("```", start)
+            text = text[start:end].strip()
+        except ValueError:
+            text = text[start:].strip()
 
     # 定位 JSON 边界：优先数组 [...], 其次对象 {...}
     bracket_start = text.find("[")
@@ -845,6 +839,7 @@ def parse_single_task(
             context_parts.append(f"[{m.get('role', '?')}]: {m.get('content', '')}")
         # 检查历史中提到的已删除节点
         stale_ids = set()
+        import re as _re
         for m in recent:
             content = m.get("content", "")
             if "[待确认]" in content or "[反问]" in content:
@@ -946,3 +941,4 @@ def parse_single_task(
         "question": f"AI 多次输出格式错误（{last_error.error_code if last_error else 'unknown'}），请重新描述你的需求。",
         "options": ["重试", "手动输入"],
     }
+
