@@ -165,15 +165,18 @@ var DAGView = (function () {
       evt.originalEvent.preventDefault();
     });
 
-    // 右键节点 → 编辑
+    // 右键节点 → 显示上下文菜单（编辑 / 删除）
     _cy.on("cxttap", "node", function (evt) {
       evt.originalEvent.preventDefault();
       _hideTooltip();
       var data = evt.target.data();
       if (data.is_group) return;
-      if (typeof window.app !== "undefined" && window.app.openEditModal) {
-        window.app.openEditModal(data.id);
-      }
+      _showContextMenu(evt.originalEvent.clientX, evt.originalEvent.clientY, data.id);
+    });
+
+    // 点击画布空白处关闭菜单
+    _cy.on("tap", function (evt) {
+      if (evt.target === _cy) _hideContextMenu();
     });
 
     return _cy;
@@ -374,12 +377,47 @@ var DAGView = (function () {
     if (_tooltip) { _tooltip.remove(); _tooltip = null; }
   }
 
+  // ---- 右键上下文菜单 ----
+  var _ctxMenu = null;
+
+  function _showContextMenu(x, y, nodeId) {
+    _hideContextMenu();
+    _ctxMenu = document.createElement("div");
+    _ctxMenu.className = "dag-context-menu";
+    _ctxMenu.style.cssText =
+      "position:fixed;z-index:10000;left:" + x + "px;top:" + y + "px;" +
+      "background:rgba(17,17,48,0.95);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);" +
+      "border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:4px;" +
+      "box-shadow:0 8px 32px rgba(0,0,0,0.5);min-width:100px;font-size:13px;" +
+      "animation:ctx-in 0.15s cubic-bezier(0.34,1.56,0.64,1)";
+    _ctxMenu.innerHTML =
+      '<div onclick="document._hideCtxMenu();window.app.openEditModal(\'' + nodeId + '\')" ' +
+      'style="padding:8px 14px;cursor:pointer;border-radius:6px;color:#e2e8f0;transition:background 0.15s" ' +
+      'onmouseover="this.style.background=\'rgba(129,140,248,0.2)\'" onmouseout="this.style.background=\'transparent\'">' +
+      '✏️ 编辑</div>' +
+      '<div onclick="document._hideCtxMenu();window.app.openDeleteModal(\'' + nodeId + '\')" ' +
+      'style="padding:8px 14px;cursor:pointer;border-radius:6px;color:#fca5a5;transition:background 0.15s" ' +
+      'onmouseover="this.style.background=\'rgba(248,113,113,0.15)\'" onmouseout="this.style.background=\'transparent\'">' +
+      '🗑️ 删除</div>';
+    document.body.appendChild(_ctxMenu);
+    document._hideCtxMenu = _hideContextMenu;
+    // 点击其他位置关闭
+    setTimeout(function() {
+      document.addEventListener("click", _hideContextMenu, {once: true});
+    }, 0);
+  }
+
+  function _hideContextMenu() {
+    if (_ctxMenu) { _ctxMenu.remove(); _ctxMenu = null; }
+    document._hideCtxMenu = null;
+  }
+
   // 注入 tooltip 样式（液态玻璃风格）
   (function () {
     if (document.getElementById("dag-tooltip-style")) return;
     var s = document.createElement("style");
     s.id = "dag-tooltip-style";
-    s.textContent = ".dag-tooltip{position:absolute;z-index:1000;background:rgba(17,17,48,0.9);backdrop-filter:blur(24px) saturate(180%);-webkit-backdrop-filter:blur(24px) saturate(180%);border:1px solid rgba(255,255,255,0.08);border-radius:14px;padding:12px 16px;box-shadow:0 8px 32px rgba(0,0,0,0.5),0 0 48px rgba(129,140,248,0.08);font-size:12px;pointer-events:none;min-width:180px;color:#e2e8f0;animation:tooltip-in 0.15s cubic-bezier(0.34,1.56,0.64,1)}.dag-tooltip strong{display:block;margin-bottom:6px;font-size:13px;background:linear-gradient(135deg,#c7d2fe,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}.dag-tooltip table{width:100%}.dag-tooltip td{padding:2px 0}.dag-tooltip td:first-child{color:#64748b;width:60px}";
+    s.textContent = ".dag-tooltip{position:absolute;z-index:1000;background:rgba(17,17,48,0.9);backdrop-filter:blur(24px) saturate(180%);-webkit-backdrop-filter:blur(24px) saturate(180%);border:1px solid rgba(255,255,255,0.08);border-radius:14px;padding:12px 16px;box-shadow:0 8px 32px rgba(0,0,0,0.5),0 0 48px rgba(129,140,248,0.08);font-size:12px;pointer-events:none;min-width:180px;color:#e2e8f0;animation:tooltip-in 0.15s cubic-bezier(0.34,1.56,0.64,1)}.dag-tooltip strong{display:block;margin-bottom:6px;font-size:13px;background:linear-gradient(135deg,#c7d2fe,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}.dag-tooltip table{width:100%}.dag-tooltip td{padding:2px 0}.dag-tooltip td:first-child{color:#64748b;width:60px}@keyframes ctx-in{from{opacity:0;transform:scale(0.9)}to{opacity:1;transform:scale(1)}}";
     document.head.appendChild(s);
   })();
 
