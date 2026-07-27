@@ -828,12 +828,75 @@
       }).join("");
       document.getElementById("edit-node-deps-list").innerHTML = depsHtml || '<span style="color:#64748b;font-size:12px">无其他节点</span>';
       document.getElementById("modal-edit-node").classList.remove("hidden");
+      loadTodos();
     });
   }
 
   function closeEditModal() {
     document.getElementById("modal-edit-node").classList.add("hidden");
     _editingNodeId = null;
+  }
+
+  // ---- 待办事项管理 ----
+
+  async function loadTodos() {
+    if (!_editingNodeId || !currentProjectId) return;
+    try {
+      var data = await API.listTodos(currentProjectId, _editingNodeId);
+      var todos = data.todos || [];
+      var list = document.getElementById("edit-node-todo-list");
+      if (!list) return;
+      if (todos.length === 0) {
+        list.innerHTML = '<div style="color:var(--text-muted);padding:4px 0">暂无待办</div>';
+        return;
+      }
+      list.innerHTML = todos.map(function(t) {
+        var checked = t.done ? " checked" : "";
+        var style = t.done ? "text-decoration:line-through;color:var(--text-muted)" : "";
+        return '<div style="display:flex;align-items:center;gap:4px;padding:2px 0;border-bottom:1px solid var(--glass-border)">'
+          + '<input type="checkbox"' + checked + ' onchange="app.toggleTodo(\'' + t.id + '\', this.checked)" style="width:auto;accent-color:var(--brand)">'
+          + '<span style="flex:1;font-size:12px;' + style + '">' + escapeHtml(t.text) + '</span>'
+          + '<button onclick="app.deleteTodoItem(\'' + t.id + '\')" style="font-size:10px;padding:1px 6px;background:var(--danger-light);color:var(--danger);border:1px solid rgba(248,113,113,0.2);border-radius:3px">x</button>'
+          + '</div>';
+      }).join("");
+    } catch (e) {
+      console.warn("[App] loadTodos error:", e);
+    }
+  }
+
+  async function addTodoItem() {
+    if (!_editingNodeId || !currentProjectId) return;
+    var input = document.getElementById("edit-node-todo-input");
+    if (!input) return;
+    var text = input.value.trim();
+    if (!text) return;
+    try {
+      await API.addTodo(currentProjectId, _editingNodeId, text);
+      input.value = "";
+      loadTodos();
+    } catch (e) {
+      showToast("添加失败: " + e.message, true);
+    }
+  }
+
+  async function toggleTodo(todoId, done) {
+    if (!_editingNodeId || !currentProjectId) return;
+    try {
+      await API.updateTodo(currentProjectId, _editingNodeId, todoId, {done: done});
+      loadTodos();
+    } catch (e) {
+      showToast("更新失败: " + e.message, true);
+    }
+  }
+
+  async function deleteTodoItem(todoId) {
+    if (!_editingNodeId || !currentProjectId) return;
+    try {
+      await API.deleteTodo(currentProjectId, _editingNodeId, todoId);
+      loadTodos();
+    } catch (e) {
+      showToast("删除失败: " + e.message, true);
+    }
   }
 
   async function saveEditNode() {
@@ -995,6 +1058,10 @@
     toggleTag: toggleTag,
     clearTags: clearTags,
     loadTags: loadTags,
+    // 待办事项
+    addTodoItem: addTodoItem,
+    toggleTodo: toggleTodo,
+    deleteTodoItem: deleteTodoItem,
   };
 
 })();

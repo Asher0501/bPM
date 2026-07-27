@@ -65,7 +65,7 @@ from config import get_config
 from models.project import (
     Project, TaskNode, EdgeDef, RiskItem, RiskLevel, TaskStatus,
     CreateProjectRequest, ProgressUpdateRequest, EditTaskRequest,
-    AddNodeRequest,
+    AddNodeRequest, TodoCreateRequest, TodoUpdateRequest,
     ProjectListResponse, ProjectDetailResponse, ScheduleResponse,
     ProgressResponse, GraphResponse,
     now_iso,
@@ -547,6 +547,8 @@ async def get_graph(project_id: str):
             "float_days": n.float_days,
             "notes": n.notes,
             "tags": n.tags or [],
+            "todos": n.todos or [],
+            "todo_incomplete": sum(1 for t in (n.todos or []) if not t.get("done")),
         })
 
     edges_data = [{"source": e.source, "target": e.target} for e in project.edges]
@@ -1144,6 +1146,81 @@ async def delete_node(project_id: str, node_id: str):
         "affected_names": affected_names,
         "project": project.model_dump(),
     }
+
+
+# ---- 待办事项 CRUD ----
+
+
+@router.get("/projects/{project_id}/nodes/{node_id}/todos")
+async def list_todos(project_id: str, node_id: str):
+    """获取节点的待办事项列表"""
+    project = _load_project(project_id)
+    node_map = {n.id: n for n in project.nodes}
+    if node_id not in node_map:
+        raise HTTPException(status_code=404, detail=f"Node not found: {node_id}")
+    return {"todos": node_map[node_id].todos or []}
+
+
+@router.post("/projects/{project_id}/nodes/{node_id}/todos")
+async def add_todo(project_id: str, node_id: str, req: TodoCreateRequest):
+    """添加待办事项"""
+    project = _load_project(project_id)
+    node_map = {n.id: n for n in project.nodes}
+    if node_id not in node_map:
+        raise HTTPException(status_code=404, detail=f"Node not found: {node_id}")
+    node = node_map[node_id]
+    todo = {
+        "id": uuid.uuid4().hex[:6],
+        "text": req.text.strip(),
+        "done": False,
+        "created_at": now_iso(),
+    }
+    if not node.todos:
+        node.todos = []
+    node.todos.append(todo)
+    project.updated_at = now_iso()
+    _save_project(project)
+    return {"todo": todo, "count": len(node.todos),
+            "incomplete": sum(1 for t in node.todos if not t.get("done"))}
+
+
+@router.put("/projects/{project_id}/nodes/{node_id}/todos/{todo_id}")
+async def update_todo(project_id: str, node_id: str, todo_id: str, req: TodoUpdateRequest):
+    """更新待办事项（切换完成状态或修改文本）"""
+    project = _load_project(project_id)
+    node_map = {n.id: n for n in project.nodes}
+    if node_id not in node_map:
+        raise HTTPException(status_code=404, detail=f"Node not found: {node_id}")
+    node = node_map[node_id]
+    for t in (node.todos or []):
+        if t.get("id") == todo_id:
+            if req.done is not None:
+                t["done"] = req.done
+            if req.text is not None:
+                t["text"] = req.text.strip()
+            project.updated_at = now_iso()
+            _save_project(project)
+            return {"todo": t, "count": len(node.todos),
+                    "incomplete": sum(1 for x in node.todos if not x.get("done"))}
+    raise HTTPException(status_code=404, detail=f"Todo not found: {todo_id}")
+
+
+@router.delete("/projects/{project_id}/nodes/{node_id}/todos/{todo_id}")
+async def delete_todo(project_id: str, node_id: str, todo_id: str):
+    """删除待办事项"""
+    project = _load_project(project_id)
+    node_map = {n.id: n for n in project.nodes}
+    if node_id not in node_map:
+        raise HTTPException(status_code=404, detail=f"Node not found: {node_id}")
+    node = node_map[node_id]
+    before = len(node.todos or [])
+    node.todos = [t for t in (node.todos or []) if t.get("id") != todo_id]
+    if len(node.todos) == before:
+        raise HTTPException(status_code=404, detail=f"Todo not found: {todo_id}")
+    project.updated_at = now_iso()
+    _save_project(project)
+    return {"deleted": todo_id, "count": len(node.todos),
+            "incomplete": sum(1 for t in node.todos if not t.get("done"))}
 
 
 # ---- 边（依赖关系）CRUD ----

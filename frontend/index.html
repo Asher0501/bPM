@@ -170,6 +170,12 @@
       <input type="text" id="edit-node-tags" placeholder="backend, P0, auth">
       <label for="edit-node-notes">备注</label>
       <textarea id="edit-node-notes" rows="2"></textarea>
+      <label>待办事项</label>
+      <div style="display:flex;gap:4px;margin-bottom:4px">
+        <input type="text" id="edit-node-todo-input" placeholder="新增待办..." style="flex:1;margin-top:0">
+        <button class="btn-primary" onclick="app.addTodoItem()" style="padding:4px 10px;font-size:11px;margin-top:0">+</button>
+      </div>
+      <div id="edit-node-todo-list" style="max-height:120px;overflow-y:auto;font-size:12px"></div>
     </div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
       <button class="btn-outline" onclick="app.closeEditModal()">取消</button>

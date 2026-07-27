@@ -15,6 +15,9 @@ var DAGView = (function () {
     }
     var pct = n.progress || 0;
     if (pct > 0 && pct < 100) name = name + "  " + pct + "%";
+    // 待办 badge
+    var todoInc = n.todo_incomplete || 0;
+    if (todoInc > 0) name = name + "  ●" + todoInc;
     // 日期行
     var es = n.es_date || "";
     var ef = n.ef_date || "";
@@ -204,7 +207,7 @@ var DAGView = (function () {
           esDate: n.es_date, efDate: n.ef_date, lsDate: n.ls_date, lfDate: n.lf_date,
           resources: (n.resources || []).join(", "), notes: n.notes || "",
           tags: (n.tags || []).join(", "), children: (n.children || []).join(", "),
-          is_group: n.is_group || false,
+          is_group: n.is_group || false, todo_incomplete: n.todo_incomplete || 0,
         },
         classes: ("status-" + n.status + (n.is_critical ? " critical" : "") + (n.is_group ? " is-group" : "")).trim(),
       });
@@ -255,6 +258,7 @@ var DAGView = (function () {
         existing.data("tags", (n.tags || []).join(", "));
         existing.data("children", n.children || []);
         existing.data("is_group", n.is_group || false);
+        existing.data("todo_incomplete", n.todo_incomplete || 0);
         // 更新 class
         "completed,in_progress,pending,delayed,blocked".split(",").forEach(function (s) { existing.removeClass("status-" + s); });
         existing.addClass("status-" + n.status);
@@ -299,6 +303,7 @@ var DAGView = (function () {
         esDate: n.es_date, efDate: n.ef_date, lsDate: n.ls_date, lfDate: n.lf_date,
         resources: (n.resources || []).join(", "), notes: n.notes || "",
         tags: (n.tags || []).join(", "), children: n.children || [],
+        todo_incomplete: n.todo_incomplete || 0,
       },
       classes: ("status-" + n.status + (n.is_critical ? " critical" : "") + (n.is_group ? " is-group" : "")).trim(),
     });

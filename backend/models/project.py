@@ -44,6 +44,7 @@ class TaskNode(BaseModel):
     is_critical: bool = False                  # 是否在关键路径上
     notes: str = ""                            # 备注
     tags: list[str] = []                       # 标签，如 ["backend", "P0"]
+    todos: list[dict] = []                      # 待办事项 [{id, text, done, created_at}]
     last_progress_update: Optional[str] = None # 上次进度更新时间 (ISO格式)
 
 
@@ -124,6 +125,15 @@ class EditTaskRequest(BaseModel):
     status: Optional[TaskStatus] = None
     notes: Optional[str] = None
     tags: Optional[list[str]] = None
+
+
+class TodoCreateRequest(BaseModel):
+    text: str
+
+
+class TodoUpdateRequest(BaseModel):
+    text: Optional[str] = None
+    done: Optional[bool] = None
 
 
 class AddNodeRequest(BaseModel):

@@ -66,6 +66,20 @@ const API = (() => {
       return request("DELETE", `/api/projects/${projectId}/edges/${source}/${target}`);
     },
 
+    // 待办事项
+    listTodos(projectId, nodeId) {
+      return request("GET", `/api/projects/${projectId}/nodes/${nodeId}/todos`);
+    },
+    addTodo(projectId, nodeId, text) {
+      return request("POST", `/api/projects/${projectId}/nodes/${nodeId}/todos`, {text});
+    },
+    updateTodo(projectId, nodeId, todoId, data) {
+      return request("PUT", `/api/projects/${projectId}/nodes/${nodeId}/todos/${todoId}`, data);
+    },
+    deleteTodo(projectId, nodeId, todoId) {
+      return request("DELETE", `/api/projects/${projectId}/nodes/${nodeId}/todos/${todoId}`);
+    },
+
     // 健康检查
     health()           { return request("GET", "/api/health"); },
   };
