@@ -148,14 +148,32 @@ var DAGView = (function () {
       ],
     });
 
-    // 点击节点显示 tooltip
+    // 单击节点 → 直接弹出编辑
     _cy.on("tap", "node", function (evt) {
       var node = evt.target;
       var data = node.data();
-      _showTooltip(node, data);
+      _hideTooltip();
+      if (data.is_group) {
+        // 聚合节点：仅显示 tooltip
+        _showTooltip(node, data);
+        return;
+      }
+      // 普通节点：直接打开编辑弹窗
+      if (typeof window.app !== "undefined" && window.app.openEditModal) {
+        window.app.openEditModal(data.id);
+      }
     });
     _cy.on("tap", function (evt) {
       if (evt.target === _cy) _hideTooltip();
+    });
+
+    // 鼠标悬停 → tooltip 预览
+    _cy.on("mouseover", "node", function (evt) {
+      var node = evt.target;
+      _showTooltip(node, node.data());
+    });
+    _cy.on("mouseout", "node", function () {
+      _hideTooltip();
     });
 
     return _cy;
