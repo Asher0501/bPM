@@ -891,7 +891,7 @@ async def _edit_node_impl(project_id: str, node_id: str, req: EditTaskRequest):
         if hasattr(node, key):
             setattr(node, key, value)
 
-    _reschedule_project(project)
+    _reschedule_project(project, skip_llm=True)  # 快速模式：手动操作不需要 LLM 风险分析
     _save_project(project)
     return {"project": project.model_dump()}
 
@@ -1080,7 +1080,7 @@ async def process_command(project_id: str, req: AddNodeRequest):
     else:
         raise HTTPException(status_code=400, detail="请提供新任务的描述（自然语言）或手动填写名称和工期")
 
-    _reschedule_project(project)
+    _reschedule_project(project, skip_llm=True)
     _save_project(project)  # _save_project 内部统一裁剪 messages
     return {"project": project.model_dump(), "new_node_id": result_node_id}
 
@@ -1134,7 +1134,7 @@ async def delete_node(project_id: str, node_id: str):
         if node_id in n.pre_dependencies:
             n.pre_dependencies = [d for d in n.pre_dependencies if d != node_id]
 
-    _reschedule_project(project)
+    _reschedule_project(project, skip_llm=True)
     _save_project(project)
 
     return {
@@ -1200,7 +1200,7 @@ async def add_edge(project_id: str, req: AddEdgeRequest):
     else:
         project.messages.append({"role": "assistant", "content": f"边 {req.source}→{req.target} 已存在，无需重复添加"})
 
-    _reschedule_project(project)
+    _reschedule_project(project, skip_llm=True)
     _save_project(project)
     return {"project": project.model_dump(), "edge": {"source": req.source, "target": req.target}}
 
@@ -1220,6 +1220,6 @@ async def delete_edge(project_id: str, source: str, target: str):
         project.messages.append({"role": "user", "content": f"删除依赖: {target} 不再依赖 {source}"})
         project.messages.append({"role": "assistant", "content": f"已删除边 {source}→{target}"})
 
-    _reschedule_project(project)
+    _reschedule_project(project, skip_llm=True)
     _save_project(project)
     return {"project": project.model_dump(), "deleted_edge": {"source": source, "target": target}}
