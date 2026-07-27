@@ -116,6 +116,7 @@ def map_intent_to_ops(intent: dict, node_map: dict) -> tuple[list[AtomicOp], dic
             "estimated_days": float(intent.get("estimated_days", 3)),
             "confidence": float(intent.get("confidence", 0.7)),
             "pre_dependencies": intent.get("pre_dependencies", []),
+                "tags": intent.get("tags", []),
             "resources": intent.get("resources", []),
             "notes": intent.get("notes", ""),
         })

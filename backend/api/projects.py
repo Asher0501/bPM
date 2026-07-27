@@ -839,6 +839,9 @@ def _build_plan_text(ops: list, node_map: dict) -> str:
             if "notes" in p and p["notes"] is not None:
                 notes_preview = p["notes"][:40] + ("..." if len(p["notes"]) > 40 else "")
                 changes.append(f"备注 →「{notes_preview}」")
+            if "tags" in p and p["tags"] is not None:
+                tags_str = ", ".join(p["tags"]) if isinstance(p["tags"], list) else str(p["tags"])
+                changes.append(f"标签 →「{tags_str}」")
             if "pre_dependencies" in p:
                 dep_names = [_get_node_name(node_map, d) for d in p["pre_dependencies"] if d in node_map]
                 changes.append(f"依赖 → [{', '.join(dep_names)}]")

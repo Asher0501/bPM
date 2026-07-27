@@ -601,7 +601,7 @@ INTENT_SCHEMA = {
         "required": ["intent", "node_id"],
         "types": {"progress": (int, float), "estimated_days": (int, float),
                    "confidence": (int, float), "pre_dependencies": list,
-                   "resources": list},
+                   "resources": list, "tags": list},
     },
     "add_edge": {
         "required": ["intent", "source", "target"],
@@ -766,7 +766,7 @@ def _build_schema_for_translation() -> str:
     lines.append("创建一个新任务节点。可选 pre_dependencies 指定前驱。")
     lines.append("如需断开旧边+建新边，配合 remove_edge + add_edge。")
     lines.append("")
-    lines.append("字段: name(必填), estimated_days(必填), confidence(0-1), pre_dependencies(数组), resources(数组), notes")
+    lines.append("字段: name(必填), estimated_days(必填), confidence(0-1), pre_dependencies(数组), resources(数组), notes, tags(数组)")
     lines.append('示例: {"intent":"add_node","name":"代码评审","estimated_days":2,"pre_dependencies":["task_3"],"resources":["后端"],"notes":"在task_3和task_5之间"}')
     lines.append("")
 
@@ -784,7 +784,7 @@ def _build_schema_for_translation() -> str:
     lines.append("这是改名/改进度/改状态/改备注/改依赖的唯一方式。")
     lines.append("支持 pre_dependencies 字段直接替换依赖列表。")
     lines.append("")
-    lines.append("字段: node_id(必填), name, progress(0-100), status(pending|in_progress|completed|delayed|blocked), estimated_days, confidence, resources, notes, pre_dependencies")
+    lines.append("字段: node_id(必填), name, progress(0-100), status(pending|in_progress|completed|delayed|blocked), estimated_days, confidence, resources, notes, pre_dependencies, tags")
     lines.append('示例(改名): {"intent":"edit_node","node_id":"task_2","name":"后端API开发"}')
     lines.append('示例(改进度): {"intent":"edit_node","node_id":"task_1","progress":100,"status":"completed"}')
     lines.append('示例(批量改名): [{"intent":"edit_node","node_id":"task_1","name":"数据库设计"},{"intent":"edit_node","node_id":"task_2","name":"API设计"}]')
