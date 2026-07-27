@@ -148,32 +148,29 @@ var DAGView = (function () {
       ],
     });
 
-    // 单击节点 → 直接弹出编辑
+    // 单击节点 → 显示 tooltip
     _cy.on("tap", "node", function (evt) {
       var node = evt.target;
-      var data = node.data();
-      _hideTooltip();
-      if (data.is_group) {
-        // 聚合节点：仅显示 tooltip
-        _showTooltip(node, data);
-        return;
-      }
-      // 普通节点：直接打开编辑弹窗
-      if (typeof window.app !== "undefined" && window.app.openEditModal) {
-        window.app.openEditModal(data.id);
-      }
+      _showTooltip(node, node.data());
     });
     _cy.on("tap", function (evt) {
       if (evt.target === _cy) _hideTooltip();
     });
 
-    // 鼠标悬停 → tooltip 预览
-    _cy.on("mouseover", "node", function (evt) {
-      var node = evt.target;
-      _showTooltip(node, node.data());
+    // 禁用 DAG 画布默认右键菜单
+    _cy.on("cxttap", function (evt) {
+      evt.originalEvent.preventDefault();
     });
-    _cy.on("mouseout", "node", function () {
+
+    // 右键节点 → 编辑
+    _cy.on("cxttap", "node", function (evt) {
+      evt.originalEvent.preventDefault();
       _hideTooltip();
+      var data = evt.target.data();
+      if (data.is_group) return;
+      if (typeof window.app !== "undefined" && window.app.openEditModal) {
+        window.app.openEditModal(data.id);
+      }
     });
 
     return _cy;
