@@ -31,11 +31,21 @@ class ConnectionManager:
 
     async def broadcast(self, project_id: str, message: dict):
         """向订阅某项目的所有客户端广播消息"""
+        disconnected = []
         for ws in self._rooms.get(project_id, []):
             try:
                 await ws.send_json(message)
-            except Exception:
-                pass  # 客户端可能已断开，静默忽略
+            except WebSocketDisconnect:
+                disconnected.append(ws)
+            except Exception as e:
+                logger.warning(
+                    "WebSocket 广播异常 (project=%s): %s",
+                    project_id, str(e)[:120],
+                )
+                disconnected.append(ws)
+        # 清理已断开的连接
+        for ws in disconnected:
+            self.disconnect(project_id, ws)
 
     async def broadcast_node_status(self, project_id: str, task_id: str,
                                      progress: float, status: str):

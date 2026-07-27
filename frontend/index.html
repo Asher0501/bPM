@@ -7,10 +7,10 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <title>bePm — AI 辅助项目排期管理</title>
-<link rel="stylesheet" href="/css/style.css?v=4">
-<script src="https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
-<script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
-<script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+<link rel="stylesheet" href="/css/style.css?v=5">
+<script src="/vendor/cytoscape.min.js"></script>
+<script src="/vendor/dagre.min.js"></script>
+<script src="/vendor/cytoscape-dagre.js"></script>
 </head>
 <body>
 
@@ -33,7 +33,7 @@
     <!-- 新建项目面板 -->
     <div id="panel-new-project" class="panel">
       <h2>新建项目排期</h2>
-      <label>项目描述（自然语言）</label>
+      <label for="input-description">项目描述（自然语言）</label>
       <textarea id="input-description" rows="12" placeholder="描述你的项目，包括：
 - 有哪些任务/阶段
 - 任务间的依赖关系（哪些必须先完成）
@@ -48,11 +48,11 @@
 接口设计需要2天，由后端和前端共同完成。
 联调测试需要5天，依赖后端API和前端都完成。
 部署上线需要1天，依赖联调测试通过。"></textarea>
-      <label>截止日期</label>
+      <label for="input-deadline">截止日期</label>
       <input type="date" id="input-deadline">
-      <label>补充信息（可选）</label>
+      <label for="input-additional">补充信息（可选）</label>
       <textarea id="input-additional" rows="3" placeholder="任何需要补充的信息..."></textarea>
-      <label>或上传文件（可选）</label>
+      <label for="input-file">或上传文件（可选）</label>
       <input type="file" id="input-file" accept=".txt,.md,.json">
       <button class="btn-primary full-width" onclick="app.createSchedule()">🚀 自动排期</button>
       <div id="create-status" class="status-msg"></div>
@@ -61,7 +61,7 @@
     <!-- 进展更新面板（统一入口：更新进展 + 节点管理 + 增删边） -->
     <div id="panel-progress" class="panel hidden">
       <h2>项目进展</h2>
-      <label>描述进展或变更（自然语言）</label>
+      <label for="input-progress">描述进展或变更（自然语言）</label>
       <textarea id="input-progress" rows="5" placeholder="可以输入任何内容，AI 会自动判断意图：
 - 「数据库设计完成了」→ 更新进度
 - 「新增性能测试3天，依赖后端API」→ 添加节点
@@ -72,10 +72,15 @@
         <button class="btn-outline" onclick="app.toggleManualAdd()" style="font-size:12px">手动添加节点</button>
       </div>
       <div id="manual-add-form" class="hidden" style="margin-top:6px">
-        <input type="text" id="input-node-name" placeholder="任务名称" style="margin-bottom:4px">
+        <label for="input-node-name">任务名称</label>
+        <input type="text" id="input-node-name" placeholder="例如：性能测试" style="margin-bottom:4px">
         <div style="display:flex;gap:6px">
-          <input type="text" id="input-node-days" placeholder="工期(天)" style="width:80px">
-          <input type="text" id="input-node-deps" placeholder="依赖ID，逗号分隔" style="flex:1">
+          <div style="width:80px"><label for="input-node-days">工期(天)</label></div>
+          <div style="flex:1"><label for="input-node-deps">依赖ID（逗号分隔）</label></div>
+        </div>
+        <div style="display:flex;gap:6px">
+          <input type="text" id="input-node-days" placeholder="3" style="width:80px">
+          <input type="text" id="input-node-deps" placeholder="task_1, task_2" style="flex:1">
         </div>
         <button class="btn-primary" onclick="app.addNodeManual()" style="width:100%;margin-top:4px;font-size:12px">手动添加</button>
       </div>
@@ -151,19 +156,19 @@
   <div class="modal-box">
     <h3>编辑节点</h3>
     <div class="modal-body">
-      <label>名称</label>
+      <label for="edit-node-name">名称</label>
       <input type="text" id="edit-node-name">
-      <label>工期（天）</label>
+      <label for="edit-node-days">工期（天）</label>
       <input type="number" id="edit-node-days" step="0.5" min="0.5">
-      <label>置信度 (0.0-1.0)</label>
+      <label for="edit-node-confidence">置信度 (0.0-1.0)</label>
       <input type="number" id="edit-node-confidence" step="0.1" min="0" max="1">
-      <label>FO（特性Owner，逗号分隔）</label>
+      <label for="edit-node-resources">FO（特性Owner，逗号分隔）</label>
       <input type="text" id="edit-node-resources">
-      <label>前置依赖（勾选依赖的任务）</label>
+      <span class="label-text">前置依赖（勾选依赖的任务）</span>
       <div id="edit-node-deps-list" style="max-height:150px;overflow-y:auto;border:1px solid var(--border);border-radius:4px;padding:6px"></div>
-      <label>标签（逗号分隔）</label>
+      <label for="edit-node-tags">标签（逗号分隔）</label>
       <input type="text" id="edit-node-tags" placeholder="backend, P0, auth">
-      <label>备注</label>
+      <label for="edit-node-notes">备注</label>
       <textarea id="edit-node-notes" rows="2"></textarea>
     </div>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
@@ -188,9 +193,9 @@
   </div>
 </div>
 
-<script src="/js/api.js?v=21"></script>
-<script src="/js/dag.js?v=21"></script>
-<script src="/js/ws.js?v=21"></script>
-<script src="/js/app.js?v=21"></script>
+<script src="/js/api.js?v=22"></script>
+<script src="/js/dag.js?v=22"></script>
+<script src="/js/ws.js?v=22"></script>
+<script src="/js/app.js?v=22"></script>
 </body>
 </html>

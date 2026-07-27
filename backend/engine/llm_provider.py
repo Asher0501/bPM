@@ -23,10 +23,69 @@ import os
 import shlex
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 熔断器 (Circuit Breaker)
+# ═══════════════════════════════════════════════════════════════════════
+
+class CircuitBreaker:
+    """LLM 调用熔断器：连续失败 N 次后熔断，冷却后自动恢复"""
+
+    def __init__(self, failure_threshold: int = 3, timeout_seconds: float = 30.0):
+        self._threshold = failure_threshold
+        self._timeout = timeout_seconds
+        self._failures = 0
+        self._last_failure_time: float = 0.0
+        self._state = "closed"  # closed | open | half-open
+
+    @property
+    def is_open(self) -> bool:
+        if self._state == "closed":
+            return False
+        if self._state == "open":
+            if time.time() - self._last_failure_time > self._timeout:
+                self._state = "half-open"
+                logger.info("Circuit breaker: open → half-open")
+                return False
+            return True
+        # half-open: allow one probe call
+        self._state = "open"
+        return False
+
+    def record_success(self):
+        if self._state != "closed":
+            logger.info("Circuit breaker: → closed (recovered)")
+        self._failures = 0
+        self._state = "closed"
+
+    def record_failure(self):
+        self._failures += 1
+        self._last_failure_time = time.time()
+        if self._failures >= self._threshold:
+            self._state = "open"
+            logger.warning("Circuit breaker: closed → open (%d failures)", self._failures)
+
+
+# 全局熔断器实例
+_llm_circuit_breaker: CircuitBreaker | None = None
+
+
+def get_circuit_breaker() -> CircuitBreaker:
+    global _llm_circuit_breaker
+    if _llm_circuit_breaker is None:
+        from config import get_config
+        llm_cfg = get_config().llm
+        _llm_circuit_breaker = CircuitBreaker(
+            failure_threshold=llm_cfg.circuit_breaker_failures,
+            timeout_seconds=llm_cfg.circuit_breaker_timeout_seconds,
+        )
+    return _llm_circuit_breaker
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -76,7 +135,9 @@ class AnthropicProvider(LlmSdkProvider):
     """Anthropic Python SDK 后端
 
     依赖: pip install anthropic
-    兼容: api.anthropic.com 及任何 Anthropic 兼容端点
+    兼容: api.anthropic.com 及任何 Anthropic 兼容端点 (DeepSeek, etc.)
+
+    DeepSeek 兼容: 当 API 返回 "Streaming is required" 时自动切换为流式模式。
     """
 
     def execute(self, ctx: LlmContext) -> LlmResult:
@@ -87,14 +148,37 @@ class AnthropicProvider(LlmSdkProvider):
             kwargs["base_url"] = ctx.base_url
         client = Anthropic(**kwargs)
 
-        response = client.messages.create(
+        # 优先尝试非流式（更简单可靠）
+        try:
+            response = client.messages.create(
+                model=ctx.model,
+                max_tokens=ctx.max_tokens,
+                system=ctx.system_prompt,
+                messages=ctx.messages,
+            )
+            return LlmResult(content=_extract_anthropic_content(response))
+        except Exception as e:
+            err_msg = str(e)
+            # DeepSeek 要求流式：自动切换
+            if "streaming" in err_msg.lower() or "stream" in err_msg.lower():
+                logger.info("Provider 检测到流式要求，自动切换为 stream 模式")
+                return self._execute_streaming(client, ctx)
+            raise
+
+    def _execute_streaming(self, client, ctx: LlmContext) -> LlmResult:
+        """流式调用 LLM，收集所有 text delta 拼接为完整响应。"""
+        text_parts: list[str] = []
+
+        with client.messages.stream(
             model=ctx.model,
             max_tokens=ctx.max_tokens,
             system=ctx.system_prompt,
             messages=ctx.messages,
-        )
+        ) as stream:
+            for text in stream.text_stream:
+                text_parts.append(text)
 
-        return LlmResult(content=_extract_anthropic_content(response))
+        return LlmResult(content="".join(text_parts))
 
 
 # ── OpenAI SDK ─────────────────────────────────────────────────────
@@ -175,12 +259,22 @@ class LlmExecutor:
         self.sdk_type = sdk_type
 
     def execute(self, ctx: LlmContext) -> LlmResult:
-        if self.provider == "sdk":
-            return self._execute_sdk(ctx)
-        elif self.provider == "cli":
-            return self._execute_cli(ctx)
-        else:
-            raise ValueError(f"Unknown provider: {self.provider}")
+        cb = get_circuit_breaker()
+        if cb.is_open:
+            raise RuntimeError("LLM 熔断器已打开，所有 LLM 调用暂时被拒绝。请等待冷却后重试。")
+
+        try:
+            if self.provider == "sdk":
+                result = self._execute_sdk(ctx)
+            elif self.provider == "cli":
+                result = self._execute_cli(ctx)
+            else:
+                raise ValueError(f"Unknown provider: {self.provider}")
+            cb.record_success()
+            return result
+        except Exception:
+            cb.record_failure()
+            raise
 
     # ── SDK provider ───────────────────────────────────────────────
 

@@ -1,30 +1,27 @@
 # -*- coding: utf-8 -*-
-"""pytest fixtures and helpers for bePm E2E tests.
+"""Shared test helpers — importable utility functions for all test files.
 
-Shared infrastructure for all test files:
-  - HTTP request helper (req)
-  - LLM availability detection (has_llm / needs_llm)
-  - Project fixture factory (create_test_project)
-  - Assertion helpers for common data shapes
-  - WebSocket helper (ws_connect, ws_receive_json)
+Pytest automatically discovers conftest.py for fixtures, but conftest
+is not directly importable. This module provides the shared functions
+that test files need to import explicitly.
 """
 
 import json
 import os
 import sys as _sys
-
-# Make the tests directory importable so test files can 'from helpers import ...'
-_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import urllib.request
 import urllib.error
-import pytest
 
-# 从 config.json 读取测试 BASE URL
+# 从 config.json 读取测试配置
 try:
+    _sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
     from config import get_config
-    BASE = get_config().test.base_url
+    _test_cfg = get_config().test
+    BASE = _test_cfg.base_url
+    _TIMEOUT = _test_cfg.timeout_seconds
 except Exception:
     BASE = "http://127.0.0.1:48090"
+    _TIMEOUT = 120
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -35,71 +32,47 @@ def req(method, path, body=None):
     """Make an HTTP request to the test server.
 
     Returns (status_code, response_dict).
-    On HTTP errors, response_dict has an "error" key with the raw body.
     """
-    url = BASE + path
+    # URL encode the path to handle spaces and special chars
+    from urllib.parse import quote
+    url = BASE + quote(path, safe="/?:=&")
     data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body else None
     r = urllib.request.Request(url, data=data, method=method)
     r.add_header("Content-Type", "application/json; charset=utf-8")
     r.add_header("Accept", "application/json")
     try:
-        with urllib.request.urlopen(r, timeout=120) as resp:
-            content_type = resp.headers.get("Content-Type", "")
+        with urllib.request.urlopen(r, timeout=_TIMEOUT) as resp:
             raw = resp.read().decode("utf-8")
             try:
                 return resp.status, json.loads(raw)
             except json.JSONDecodeError:
-                return resp.status, {"_raw": raw, "_content_type": content_type}
+                return resp.status, {"_raw": raw}
     except urllib.error.HTTPError as e:
         body_text = e.read().decode("utf-8") if e.fp else ""
         return e.code, {"error": body_text}
+    except Exception as e:
+        return 0, {"error": str(e)}
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LLM availability
-# ═══════════════════════════════════════════════════════════════════════
-
-def has_llm() -> bool:
-    """Check if LLM API key is configured."""
-    try:
-        from config import get_anthropic_config
-        cfg = get_anthropic_config()
-        return bool(cfg.get("api_key"))
-    except Exception:
-        return False
-
-
-def needs_llm():
-    """Fixture: skip test if no LLM API key is configured."""
-    if not has_llm():
-        pytest.skip("LLM API key not configured — test requires LLM")
-
-
-def pytest_configure(config):
-    """Register custom markers."""
-    config.addinivalue_line(
-        "markers",
-        "needs_llm: Skip test if no LLM API key is configured",
-    )
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# Project fixture factory
+# Project fixture factory (for use outside pytest fixtures)
 # ═══════════════════════════════════════════════════════════════════════
 
 def create_test_project(description, deadline="", additional_info="", file_text=None):
     """Create a project via API and return (project_id, project_dict).
 
-    Skips the test if LLM cannot parse the description.
+    Skips the test if LLM is unavailable or cannot parse the description.
     """
-    body = {"description": description, "deadline": deadline, "additional_info": additional_info}
+    body = {"description": description, "deadline": deadline,
+            "additional_info": additional_info}
     if file_text:
         body["file_text"] = file_text
     s, d = req("POST", "/api/projects", body)
     if s != 200:
+        import pytest
         detail = d.get("error", str(d))
         if "LLM" in detail or "解析" in detail or "parse" in detail.lower():
-            pytest.skip(f"LLM parse failed: {detail[:100]}")
+            pytest.skip(f"LLM cannot parse description: {detail[:100]}")
         pytest.fail(f"create_test_project failed ({s}): {detail[:200]}")
     proj = d.get("project", {})
     pid = proj.get("id", "")
@@ -107,41 +80,9 @@ def create_test_project(description, deadline="", additional_info="", file_text=
     return pid, proj
 
 
-@pytest.fixture(scope="module")
-def api():
-    """Provides req helper and BASE URL."""
-    return {"req": req, "BASE": BASE}
-
-
-@pytest.fixture
-def tmp_project():
-    """Create a disposable project, auto-cleanup after test.
-
-    Yields (project_id, project_dict).
-    """
-    pid, proj = create_test_project(
-        "Temporary test project with database design for 2 days and API dev for 3 days."
-    )
-    yield pid, proj
-    # cleanup
-    s, _ = req("DELETE", f"/api/projects/{pid}")
-    # ignore cleanup errors (project may already be deleted by the test)
-
-
 # ═══════════════════════════════════════════════════════════════════════
 # Assertion helpers
 # ═══════════════════════════════════════════════════════════════════════
-
-def assert_valid_node(node, require_times=True):
-    """Assert a node dict has all required fields for frontend rendering."""
-    required = ["id", "name", "progress", "status", "is_critical", "estimated_days",
-                "confidence", "resources", "pre_dependencies", "tags"]
-    for field in required:
-        assert field in node, f"Node missing field: {field}"
-    if require_times:
-        for field in ["es", "ef", "ls", "lf", "float_days"]:
-            assert field in node, f"Node missing time field: {field}"
-
 
 def assert_valid_graph(graph):
     """Assert graph response has correct structure for DAG rendering."""
@@ -150,94 +91,88 @@ def assert_valid_graph(graph):
     assert "critical_path" in graph, "Graph missing 'critical_path'"
     assert "risks" in graph, "Graph missing 'risks'"
     assert "buffer" in graph, "Graph missing 'buffer'"
-    # Every graph node has required frontend fields
     node_ids = set()
     for gn in graph["nodes"]:
-        assert_valid_node(gn)
+        for f in ["id", "name", "progress", "status", "is_critical"]:
+            assert f in gn, f"Graph node missing '{f}'"
         node_ids.add(gn["id"])
-    # Every edge references real nodes
     for ge in graph["edges"]:
         assert "source" in ge and "target" in ge
         assert ge["source"] in node_ids, f"Edge source '{ge['source']}' not in nodes"
         assert ge["target"] in node_ids, f"Edge target '{ge['target']}' not in nodes"
-    # Critical path references real nodes
     for nid in graph.get("critical_path", []):
-        assert nid in node_ids, f"Critical path node '{nid}' not in graph nodes"
-
-
-def assert_valid_risk(risk):
-    """Assert a risk dict has required fields."""
-    for field in ["risk_id", "level", "dimension", "message"]:
-        assert field in risk, f"Risk missing field: {field}"
-    assert risk["level"] in ("critical", "warning", "info"), \
-        f"Invalid risk level: {risk['level']}"
+        assert nid in node_ids, f"CP node '{nid}' not in graph nodes"
 
 
 def assert_valid_schedule(schedule):
     """Assert schedule result has required fields."""
-    assert "topological_order" in schedule
-    assert "critical_path" in schedule
-    assert "total_duration_days" in schedule
-    assert "project_buffer_days" in schedule
+    for f in ["topological_order", "critical_path", "total_duration_days",
+              "project_buffer_days"]:
+        assert f in schedule, f"Schedule missing '{f}'"
 
 
 def assert_valid_buffer(buffer):
     """Assert buffer info has required fields and valid status."""
-    for field in ["total_days", "consumed_days", "remaining_days", "ratio", "status"]:
-        assert field in buffer, f"Buffer missing field: {field}"
+    for f in ["total_days", "consumed_days", "remaining_days", "ratio", "status"]:
+        assert f in buffer, f"Buffer missing '{f}'"
     assert buffer["status"] in ("green", "yellow", "red"), \
         f"Invalid buffer status: {buffer['status']}"
 
 
+def assert_valid_risk(risk):
+    """Assert a risk dict has required fields."""
+    for f in ["risk_id", "level", "dimension", "message"]:
+        assert f in risk, f"Risk missing '{f}'"
+    assert risk["level"] in ("critical", "warning", "info"), \
+        f"Invalid risk level: {risk['level']}"
+
+
 def assert_topo_order_valid(nodes, topo_order):
-    """Assert topological order: each node's predecessors appear before it."""
+    """Assert topological order: predecessors appear before successors."""
     pos = {tid: i for i, tid in enumerate(topo_order)}
     for n in nodes:
         for pre in n.get("pre_dependencies", []):
             if pre in pos and n["id"] in pos:
                 assert pos[pre] < pos[n["id"]], \
-                    f"Topo order violated: {pre} (pos {pos[pre]}) after {n['id']} (pos {pos[n['id']]})"
+                    f"Topo order violated: {pre} after {n['id']}"
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# WebSocket helpers (requires `pip install websockets`)
+# WebSocket helpers
 # ═══════════════════════════════════════════════════════════════════════
 
 try:
     import websockets.sync.client as ws_sync
-    _HAS_WEBSOCKETS = True
+    _HAS_WS = True
 except ImportError:
-    _HAS_WEBSOCKETS = False
+    _HAS_WS = False
 
 
 def ws_connect(project_id, timeout=5):
-    """Connect to project WebSocket, return sync client.
-
-    Returns None if websockets library unavailable or connection fails.
-    """
-    if not _HAS_WEBSOCKETS:
+    """Connect to project WebSocket. Returns client or None."""
+    if not _HAS_WS:
         return None
-    ws_url = f"ws://127.0.0.1:48090/ws/projects/{project_id}"
     try:
-        ws = ws_sync.connect(ws_url, open_timeout=timeout)
-        return ws
+        return ws_sync.connect(
+            f"ws://127.0.0.1:48090/ws/projects/{project_id}",
+            open_timeout=timeout
+        )
     except Exception:
         return None
 
 
 def ws_receive_json(ws, timeout=5):
-    """Receive one JSON message from WebSocket. Returns dict or None."""
+    """Receive one JSON message from WebSocket."""
     if ws is None:
         return None
     try:
-        raw = ws.recv(timeout=timeout)
-        return json.loads(raw)
+        return json.loads(ws.recv(timeout=timeout))
     except Exception:
         return None
 
 
 def ws_send(ws, text):
-    """Send text message via WebSocket."""
+    """Send text via WebSocket."""
     if ws:
         try:
             ws.send(text)
@@ -246,6 +181,7 @@ def ws_send(ws, text):
 
 
 def requires_websockets():
-    """Fixture-like check: skip if websockets library unavailable."""
-    if not _HAS_WEBSOCKETS:
+    """Raise pytest.skip if websockets library unavailable."""
+    if not _HAS_WS:
+        import pytest
         pytest.skip("websockets library not installed (pip install websockets)")

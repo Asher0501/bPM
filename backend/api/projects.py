@@ -6,14 +6,62 @@ import logging
 import os
 import re
 import shutil
+import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
+
+# 跨平台文件锁
+if os.name == "nt":
+    import msvcrt as _fcntl_module
+
+    @contextmanager
+    def _file_lock(f, exclusive=True, timeout=5.0):
+        """Windows 文件锁"""
+        deadline = time.time() + timeout
+        while True:
+            try:
+                _fcntl_module.locking(f.fileno(), _fcntl_module.LK_NBLCK if exclusive else _fcntl_module.LK_NBRLCK, 1)
+                break
+            except OSError:
+                if time.time() > deadline:
+                    raise TimeoutError(f"无法在 {timeout}s 内获取文件锁")
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            try:
+                f.seek(0)
+                _fcntl_module.locking(f.fileno(), _fcntl_module.LK_UNLCK, 1)
+            except OSError:
+                pass
+else:
+    import fcntl as _fcntl_module
+
+    @contextmanager
+    def _file_lock(f, exclusive=True, timeout=5.0):
+        """Unix 文件锁"""
+        op = _fcntl_module.LOCK_EX if exclusive else _fcntl_module.LOCK_SH
+        deadline = time.time() + timeout
+        while True:
+            try:
+                _fcntl_module.flock(f.fileno(), op | _fcntl_module.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.time() > deadline:
+                    raise TimeoutError(f"无法在 {timeout}s 内获取文件锁")
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            _fcntl_module.flock(f.fileno(), _fcntl_module.LOCK_UN)
 
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
+from config import get_config
 from models.project import (
     Project, TaskNode, EdgeDef, RiskItem, RiskLevel, TaskStatus,
     CreateProjectRequest, ProgressUpdateRequest, EditTaskRequest,
@@ -22,11 +70,14 @@ from models.project import (
     ProgressResponse, GraphResponse,
     now_iso,
 )
-from engine.intents import AtomicOp
-from engine.parser import parse_project, parse_progress, analyze_risks, parse_single_task
+from engine.intents import AtomicOp, map_intent_to_ops
+from engine.parser import (
+    parse_project, parse_progress, analyze_risks, parse_single_task, sanitize_user_input,
+)
 from engine.scheduler import (
     create_schedule, build_edges_from_dependencies,
     update_buffer_consumption, compute_buffer_info,
+    structural_risk_scan,
 )
 from api.ws import manager
 
@@ -51,10 +102,14 @@ def _load_index() -> list[dict]:
 
 
 def _save_index(index: list[dict]):
-    """保存项目索引"""
+    """保存项目索引（文件锁防并发写）"""
     PROJECTS_ROOT.mkdir(parents=True, exist_ok=True)
-    with open(INDEX_PATH, "w", encoding="utf-8") as f:
-        json.dump(index, f, ensure_ascii=False, indent=2)
+    with open(INDEX_PATH, "r+", encoding="utf-8") if INDEX_PATH.exists() else \
+         open(INDEX_PATH, "w+", encoding="utf-8") as f:
+        with _file_lock(f):
+            f.seek(0)
+            f.truncate()
+            json.dump(index, f, ensure_ascii=False, indent=2)
 
 
 def _upsert_index(project: Project):
@@ -123,7 +178,13 @@ def _load_project(project_id: str) -> Project:
 
 
 def _save_project(project: Project):
-    """保存项目：project.json + messages.json 分开存储"""
+    """保存项目：project.json + messages.json 分开存储（含 messages 裁剪）"""
+    # 限制 messages 增长（所有写入路径统一裁剪）
+    msg_cfg = get_config().messages
+    if len(project.messages) > msg_cfg.max_count:
+        project.messages = project.messages[-msg_cfg.trim_to:]
+        logger.info("项目 %s 消息裁剪: %d → %d", project.id, msg_cfg.max_count, msg_cfg.trim_to)
+
     proj_dir = _project_dir(project.id)
     proj_dir.mkdir(parents=True, exist_ok=True)
     project.updated_at = now_iso()
@@ -143,6 +204,54 @@ def _save_project(project: Project):
 
     # 更新索引
     _upsert_index(project)
+
+
+def _detect_cycle(nodes: list, new_source: str, new_target: str) -> bool:
+    """检测添加 new_source → new_target 边后是否会产生环。
+
+    使用 DFS 从 new_source 出发，沿着已有依赖关系向前搜索，
+    如果能从 new_source 到达 new_target，则添加 new_target → new_source
+    会产生环。
+
+    Args:
+        nodes: 节点列表，每个节点要有 id 和 pre_dependencies 属性
+        new_source: 源节点 ID（前置任务）
+        new_target: 目标节点 ID（后置任务，将依赖 source）
+
+    Returns:
+        True 如果添加边会产生环
+    """
+    # 构建邻接表：target → list of sources (target depends on sources)
+    # 我们要找的是从 target 能否到达 source（反向）
+    # 即在已有图中，target 是否间接依赖 source
+    # 如果添加 source → target，那么 target → ... → source 就是一个环
+    node_ids = {n.id for n in nodes}
+    if new_source not in node_ids or new_target not in node_ids:
+        return False
+
+    # 构建后继映射：source → [targets that depend on source]
+    successors = {n.id: [] for n in nodes}
+    for n in nodes:
+        for pre in n.pre_dependencies:
+            if pre in successors:
+                successors[pre].append(n.id)
+
+    # DFS 从 new_target 出发，看是否能到达 new_source
+    visited = set()
+    stack = [new_target]
+    while stack:
+        current = stack.pop()
+        if current == new_source:
+            return True  # 存在环
+        if current in visited:
+            continue
+        visited.add(current)
+        # 沿着依赖关系向下搜索
+        for succ in successors.get(current, []):
+            if succ not in visited:
+                stack.append(succ)
+
+    return False
 
 
 # ---- Routes ----
@@ -177,11 +286,11 @@ async def create_project(req: CreateProjectRequest):
     project_id = uuid.uuid4().hex[:8]
 
     # 2. 校验输入：描述不能为空
-    full_text = req.description.strip()
+    full_text = sanitize_user_input(req.description.strip())
     if req.file_text:
-        full_text += "\n\n--- 文件内容 ---\n" + req.file_text.strip()
+        full_text += "\n\n--- 文件内容 ---\n" + sanitize_user_input(req.file_text.strip())
     if req.additional_info:
-        full_text += "\n\n--- 补充信息 ---\n" + req.additional_info.strip()
+        full_text += "\n\n--- 补充信息 ---\n" + sanitize_user_input(req.additional_info.strip())
 
     if len(full_text) < 10:
         raise HTTPException(
@@ -271,12 +380,30 @@ async def delete_project(project_id: str):
 
 
 @router.post("/projects/{project_id}/schedule")
-async def re_schedule(project_id: str):
-    """重新触发自动排期（含风险分析）"""
+async def re_schedule(project_id: str, fast: bool = False):
+    """重新触发自动排期（含风险分析）。?fast=true 跳过 LLM 仅算法扫描"""
     project = _load_project(project_id)
-    _reschedule_project(project)
+    _reschedule_project(project, skip_llm=fast)
     _save_project(project)
     return {"project": project.model_dump()}
+
+
+@router.post("/projects/batch/reschedule")
+async def batch_reschedule():
+    """批量重建所有项目的排期（快速模式，仅算法扫描）"""
+    index = _load_index()
+    results = []
+    for item in index:
+        pid = item["id"]
+        try:
+            project = _load_project(pid)
+            _reschedule_project(project, skip_llm=True)
+            _save_project(project)
+            cp = len(project.schedule.critical_path) if project.schedule else 0
+            results.append({"id": pid, "status": "ok", "cp_nodes": cp})
+        except Exception as e:
+            results.append({"id": pid, "status": "error", "error": str(e)[:100]})
+    return {"results": results}
 
 
 @router.post("/projects/{project_id}/progress")
@@ -285,7 +412,7 @@ async def update_progress(project_id: str, req: ProgressUpdateRequest):
     project = _load_project(project_id)
 
     # 1. 用 LLM 解析进展文本
-    parsed = parse_progress(project.model_dump(), req.progress_text)
+    parsed = parse_progress(project.model_dump(), sanitize_user_input(req.progress_text))
     updates = parsed.get("updates", [])
     risk_signals = parsed.get("risk_signals", [])
     updated_node_ids = []
@@ -517,16 +644,6 @@ async def get_grouped(project_id: str, tags: str = ""):
 
     # --- 聚合节点 ---
     for gv, members in groups.items():
-        # 子图调度计算工期
-        from engine.scheduler import create_schedule
-        try:
-            sub_schedule = create_schedule(members, None)
-            agg_duration = sub_schedule.total_duration_days
-            agg_critical = sub_schedule.critical_path
-        except Exception:
-            agg_duration = sum(m.estimated_days for m in members)
-            agg_critical = []
-
         # 进度加权平均
         total_weight = sum(m.estimated_days for m in members)
         agg_progress = (
@@ -538,13 +655,19 @@ async def get_grouped(project_id: str, tags: str = ""):
         status_order = {"blocked": 5, "delayed": 4, "in_progress": 3, "pending": 2, "completed": 1}
         agg_status = max(members, key=lambda m: status_order.get(m.status.value, 0)).status.value
 
-        # 时间边界
+        # 时间边界：基于成员在完整项目排期中的位置（非子图重新排期）
         agg_es = min((m.es for m in members if m.es is not None), default=None)
         agg_ef = max((m.ef for m in members if m.ef is not None), default=None)
         agg_ls = min((m.ls for m in members if m.ls is not None), default=None)
         agg_lf = max((m.lf for m in members if m.lf is not None), default=None)
-        agg_float = (agg_ls - agg_es) if (agg_es is not None and agg_ls is not None) else None
-        agg_is_critical = any(m.is_critical for m in members)
+
+        # 工期：时间跨度的 span
+        agg_duration = (agg_ef - agg_es) if (agg_es is not None and agg_ef is not None) else sum(m.estimated_days for m in members)
+
+        # 关键路径：任一成员在关键路径上即为关键
+        agg_critical = [m.id for m in members if m.is_critical]
+        agg_float = round(agg_ls - agg_es, 2) if (agg_es is not None and agg_ls is not None) else None
+        agg_is_critical = any(m.is_critical for m in members) or (agg_float is not None and abs(agg_float) < 0.01)
 
         # FO 去重
         fo_set: set[str] = set()
@@ -630,14 +753,26 @@ async def get_grouped(project_id: str, tags: str = ""):
 # ---- 辅助函数 ----
 
 
-def _reschedule_project(project: Project):
-    """重新排期 + 自动风险分析（含 LLM，失败时保留旧风险数据）"""
+def _reschedule_project(project: Project, skip_llm: bool = False):
+    """重新排期 + 自动风险分析（含 LLM，失败时保留旧风险数据）
+
+    Args:
+        project: 项目对象
+        skip_llm: True 时跳过 LLM 风险分析，仅做算法扫描
+    """
     edges = build_edges_from_dependencies(project.nodes)
     schedule = create_schedule(project.nodes, project.deadline)
     buffer_info = compute_buffer_info(schedule)
     project.edges = edges
     project.schedule = schedule
     project.buffer = buffer_info
+
+    if skip_llm:
+        # 快速模式：仅算法扫描
+        from models.project import ScheduleResult, BufferInfo
+        algo_risks = structural_risk_scan(project.nodes, schedule, buffer_info)
+        project.risks = [RiskItem(**r) if isinstance(r, dict) else r for r in algo_risks]
+        return
 
     # LLM 风险分析 — 带日志和逐条容错
     try:
@@ -787,9 +922,10 @@ async def process_command(project_id: str, req: AddNodeRequest):
         project.messages.append({"role": "assistant", "content": f"已手动添加 {result_node_id}（{req.name}），工期 {req.estimated_days} 天"})
 
     elif req.description:
+        safe_desc = sanitize_user_input(req.description)
         # ---- 确认模式：直接执行已确认的计划 ----
         if req.confirmed and req.ops_to_execute:
-            project.messages.append({"role": "user", "content": req.description})
+            project.messages.append({"role": "user", "content": safe_desc})
             project.messages.append({"role": "assistant", "content": "[已确认] 执行变更计划"})
             ops = [AtomicOp(op=o["op"], params=o["params"]) for o in req.ops_to_execute]
 
@@ -828,13 +964,13 @@ async def process_command(project_id: str, req: AddNodeRequest):
                 for n in project.nodes
             ]
             intents = parse_single_task(
-                req.description, existing_summary, project.messages
+                safe_desc, existing_summary, project.messages
             )
             # 兼容旧格式（单对象 → 包装为数组）
             if isinstance(intents, dict):
                 intents = [intents]
 
-            project.messages.append({"role": "user", "content": req.description})
+            project.messages.append({"role": "user", "content": safe_desc})
             project.messages.append({"role": "assistant", "content": f"[意图] {json.dumps(intents, ensure_ascii=False)}"})
 
             # ---- 编排层：意图数组 → 原子操作序列 ----
@@ -867,6 +1003,19 @@ async def process_command(project_id: str, req: AddNodeRequest):
                 }
 
         # ---- 原子执行层（确认模式在此进入） ----
+        # 先检测环：收集所有 add_edge 操作，预检是否会产生环
+        for op in ops:
+            if op.op == "add_edge":
+                src, tgt = op.params["source"], op.params["target"]
+                if _detect_cycle(project.nodes, src, tgt):
+                    cycle_msg = f"添加边 {src}→{tgt} 会产生环，已拒绝。"
+                    project.messages.append({"role": "assistant", "content": f"[拒绝] {cycle_msg}"})
+                    _save_project(project)
+                    raise HTTPException(
+                        status_code=400,
+                        detail=cycle_msg,
+                    )
+
         for op in ops:
             if op.op == "add_node":
                 nid = op.params["id"]
@@ -928,12 +1077,8 @@ async def process_command(project_id: str, req: AddNodeRequest):
     else:
         raise HTTPException(status_code=400, detail="请提供新任务的描述（自然语言）或手动填写名称和工期")
 
-    # 限制 messages 增长：最多保留 200 条，超出时裁剪到最近 150 条
-    if len(project.messages) > 200:
-        project.messages = project.messages[-150:]
-
     _reschedule_project(project)
-    _save_project(project)
+    _save_project(project)  # _save_project 内部统一裁剪 messages
     return {"project": project.model_dump(), "new_node_id": result_node_id}
 
 
@@ -1036,6 +1181,13 @@ async def add_edge(project_id: str, req: AddEdgeRequest):
         raise HTTPException(status_code=404, detail=f"Target node not found: {req.target}")
     if req.source == req.target:
         raise HTTPException(status_code=400, detail="节点不能依赖自己")
+
+    # 环检测：添加 source → target 后，target 不应间接依赖 source
+    if _detect_cycle(project.nodes, req.source, req.target):
+        raise HTTPException(
+            status_code=400,
+            detail=f"添加边 {req.source}→{req.target} 会产生循环依赖，已拒绝。",
+        )
 
     target_node = node_map[req.target]
     if req.source not in target_node.pre_dependencies:

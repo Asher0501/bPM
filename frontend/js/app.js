@@ -398,7 +398,9 @@
         html += "<span class=\"tag-chip\" onclick=\"app.clearTags()\" style=\"background:#fee2e2;border-color:#fca5a5;color:#dc2626\">✕ 清除</span>";
       }
       el.innerHTML = html;
-    } catch (e) { /* ok */ }
+    } catch (e) {
+      console.warn("[App] loadTags error:", e);
+    }
   }
 
   function clearTags() {
@@ -500,7 +502,7 @@
     const remaining = buffer.remaining_days || 0;
     const status = buffer.status || "green";
     const statusText = { green: "健康", yellow: "关注", red: "危险" }[status] || status;
-    const emoji = { green: "\\u2705", yellow: "\\u26a0\\ufe0f", red: "\\ud83d\\udd34" }[status] || "";
+    const emoji = { green: "\u2705", yellow: "\u26a0\ufe0f", red: "\ud83d\udd34" }[status] || "";
 
     container.innerHTML =
       '<div style="display:flex;justify-content:space-between;margin-bottom:4px">'
@@ -517,7 +519,9 @@
       const graphData = await API.getGraph(projectId);
       renderRiskPanel(graphData.risks || []);
       renderBuffer(graphData.buffer, graphData.schedule);
-    } catch (err) { /* silent */ }
+    } catch (err) {
+      console.warn("[App] loadRiskPanel error:", err);
+    }
   }
 
   // ---- 状态提示（始终使用 textContent 防止 XSS） ----
@@ -547,7 +551,7 @@
     if (!toast) {
       toast = document.createElement("div");
       toast.id = "app-toast";
-      toast.style.cssText = "position:fixed;bottom:20px;right:20px;z-index:9999;padding:10px 20px;border-radius:8px;font-size:13px;box-shadow:0 4px 12px rgba(0,0,0,0.2);transition:opacity 0.3s;max-width:400px;";
+      toast.style.cssText = "position:fixed;bottom:20px;right:20px;z-index:9999;padding:12px 22px;border-radius:14px;font-size:13px;box-shadow:0 8px 32px rgba(0,0,0,0.5),0 0 48px rgba(129,140,248,0.08);transition:opacity 0.4s cubic-bezier(0.16,1,0.3,1),transform 0.3s cubic-bezier(0.34,1.56,0.64,1);max-width:400px;backdrop-filter:blur(24px) saturate(180%);-webkit-backdrop-filter:blur(24px) saturate(180%);";
       document.body.appendChild(toast);
     }
     toast.style.background = isError ? "#fef2f2" : "#f0fdf4";

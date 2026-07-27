@@ -19,8 +19,18 @@ const WSClient = (() => {
       console.log(`[WS] Connected to project ${projectId}`);
       // 心跳保持连接
       _pingInterval = setInterval(() => {
-        if (_ws && _ws.readyState === WebSocket.OPEN) {
-          _ws.send("ping");
+        try {
+          if (_ws && _ws.readyState === WebSocket.OPEN) {
+            _ws.send("ping");
+          }
+        } catch (e) {
+          console.warn("[WS] Heartbeat ping failed:", e.message);
+          if (_pingInterval) {
+            clearInterval(_pingInterval);
+            _pingInterval = null;
+          }
+          // 尝试重连
+          connect(projectId);
         }
       }, 30000);
     };
@@ -38,7 +48,10 @@ const WSClient = (() => {
 
     _ws.onclose = () => {
       console.log("[WS] Disconnected");
-      if (_pingInterval) clearInterval(_pingInterval);
+      if (_pingInterval) {
+        clearInterval(_pingInterval);
+        _pingInterval = null;
+      }
     };
 
     _ws.onerror = (e) => {
@@ -47,7 +60,10 @@ const WSClient = (() => {
   }
 
   function disconnect() {
-    if (_pingInterval) clearInterval(_pingInterval);
+    if (_pingInterval) {
+      clearInterval(_pingInterval);
+      _pingInterval = null;
+    }
     if (_ws) {
       _ws.close();
       _ws = null;

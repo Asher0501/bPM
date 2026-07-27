@@ -1,0 +1,67 @@
+{
+  "_comment": "bePm 项目配置文件 — 修改后重启服务生效。环境变量优先级高于此文件。",
+
+  "production": false,
+
+  "server": {
+    "host": "127.0.0.1",
+    "port": 48090
+  },
+
+  "cors": {
+    "origins": [
+      "http://127.0.0.1:48090",
+      "http://localhost:48090",
+      "http://127.0.0.1:5500",
+      "http://localhost:5500",
+      "http://127.0.0.1:8080",
+      "http://localhost:8080"
+    ]
+  },
+
+  "test": {
+    "base_url": "http://127.0.0.1:48090",
+    "timeout_seconds": 120
+  },
+
+  "llm": {
+    "model": "claude-sonnet-4-20250514",
+    "max_tokens": 32768,
+    "max_tokens_intent": 1024,
+    "max_tokens_translation": 2048,
+    "retry_count": 3,
+    "timeout_seconds": 300,
+    "circuit_breaker_failures": 3,
+    "circuit_breaker_timeout_seconds": 30
+  },
+
+  "rate_limit": {
+    "projects_per_minute": 5,
+    "commands_per_minute": 20,
+    "progress_per_minute": 10
+  },
+
+  "scheduler": {
+    "buffer_ratio": 0.5
+  },
+
+  "risk_scan": {
+    "merge_threshold_indegree": 3,
+    "chain_depth_warning": 5,
+    "confidence_warning": 0.6,
+    "near_critical_float_days": 2.0,
+    "near_critical_min_count": 3
+  },
+
+  "messages": {
+    "max_count": 200,
+    "trim_to": 150
+  },
+
+  "logging": {
+    "dir": "logs",
+    "max_bytes": 10485760,
+    "backup_count": 5,
+    "level": "INFO"
+  }
+}

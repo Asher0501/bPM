@@ -21,3 +21,12 @@ backend/data/
 # 审查产物
 review_output/
 *.bak
+
+# 日志
+backend/logs/
+
+# 临时目录
+tmp/
+
+# 分析报告（自动生成）
+bePm_analysis_report.html

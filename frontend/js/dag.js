@@ -25,8 +25,8 @@ var DAGView = (function () {
   function _doLayout(animate) {
     if (!_cy) return;
     var dagMsg = document.getElementById("dag-layout-msg");
-    var opts = { name: "dagre", rankDir: "LR", spacingFactor: 1.3, nodeDimensionsIncludeLabels: true, rankSep: 60, nodeSep: 30 };
-    if (animate) { opts.animate = true; opts.animationDuration = 500; opts.animationEasing = "ease-in-out-cubic"; }
+    var opts = { name: "dagre", rankDir: "LR", spacingFactor: 1.35, nodeDimensionsIncludeLabels: true, rankSep: 70, nodeSep: 35 };
+    if (animate) { opts.animate = true; opts.animationDuration = 600; opts.animationEasing = "ease-in-out-cubic"; }
     try {
       _cy.layout(opts).run();
       if (dagMsg) dagMsg.textContent = "";
@@ -60,32 +60,37 @@ var DAGView = (function () {
           selector: "node",
           style: {
             "shape": "roundrectangle",
-            "background-color": "#6b7280",
+            "background-color": "#475569",
             label: "data(label)",
             "text-valign": "center",
             "text-halign": "center",
             "font-size": "14px",
-            color: "#fff",
+            color: "#e2e8f0",
             width: 184,
             height: 54,
             "padding": "10px 16px",
-            "border-width": 0,
+            "border-width": 1,
+            "border-color": "rgba(255,255,255,0.08)",
+            "border-style": "solid",
             "font-weight": "600",
             "text-wrap": "wrap",
             "text-max-width": "166px",
             "text-justification": "center",
-            "background-opacity": 1,
+            "background-opacity": 0.85,
             "text-margin-y": 3,
             "text-outline-width": 0.3,
-            "text-outline-color": "rgba(0,0,0,0.25)",
+            "text-outline-color": "rgba(0,0,0,0.3)",
+            "transition-property": "background-color, border-color, width, height",
+            "transition-duration": 400,
+            "transition-timing-function": "cubic-bezier(0.16, 1, 0.3, 1)",
           },
         },
         {
           selector: "node.critical",
           style: {
             width: 194, height: 60,
-            "border-width": 4,
-            "border-color": "#0f172a",
+            "border-width": 3,
+            "border-color": "#818cf8",
             "border-style": "solid",
           },
         },
@@ -93,29 +98,52 @@ var DAGView = (function () {
           selector: "node.is-group",
           style: {
             "border-width": 2.5,
-            "border-color": "#818cf8",
+            "border-color": "#a78bfa",
             "border-style": "dashed",
             "padding": "12px 18px",
+            "background-opacity": 0.6,
           },
         },
         {
           selector: "node.is-group.critical",
           style: {
             "border-width": 4,
-            "border-color": "#0f172a",
+            "border-color": "#818cf8",
             "border-style": "solid",
           },
         },
-        { selector: "node.status-completed", style: { "background-color": "#0d9488" } },
-        { selector: "node.status-in_progress", style: { "background-color": "#7c3aed" } },
-        { selector: "node.status-pending", style: { "background-color": "#94a3b8" } },
-        { selector: "node.status-delayed", style: { "background-color": "#d97706" } },
-        { selector: "node.status-blocked", style: { "background-color": "#e11d48" } },
+        // Liquid glass node colors
+        { selector: "node.status-completed",
+          style: { "background-color": "#0d9488", "border-color": "rgba(52,211,153,0.3)" } },
+        { selector: "node.status-in_progress",
+          style: { "background-color": "#7c3aed", "border-color": "rgba(139,92,246,0.3)" } },
+        { selector: "node.status-pending",
+          style: { "background-color": "#475569", "border-color": "rgba(255,255,255,0.06)" } },
+        { selector: "node.status-delayed",
+          style: { "background-color": "#d97706", "border-color": "rgba(251,191,36,0.3)" } },
+        { selector: "node.status-blocked",
+          style: { "background-color": "#e11d48", "border-color": "rgba(248,113,113,0.3)" } },
         {
-          selector: "edge", style: { width: 2, "line-color": "#94a3b8", "target-arrow-color": "#94a3b8", "target-arrow-shape": "triangle", "curve-style": "bezier", "arrow-scale": 1.1 },
+          selector: "edge",
+          style: {
+            width: 1.5,
+            "line-color": "rgba(148,163,184,0.4)",
+            "target-arrow-color": "rgba(148,163,184,0.4)",
+            "target-arrow-shape": "triangle",
+            "curve-style": "bezier",
+            "arrow-scale": 1,
+            "transition-property": "line-color, target-arrow-color, width",
+            "transition-duration": 400,
+            "transition-timing-function": "cubic-bezier(0.16, 1, 0.3, 1)",
+          },
         },
         {
-          selector: "edge.critical", style: { width: 2.5, "line-color": "#0f172a", "target-arrow-color": "#0f172a" },
+          selector: "edge.critical",
+          style: {
+            width: 2.5,
+            "line-color": "#818cf8",
+            "target-arrow-color": "#818cf8",
+          },
         },
       ],
     });
@@ -180,8 +208,8 @@ var DAGView = (function () {
     // 布局
     _doLayout();
 
-    // fit
-    setTimeout(function () { if (_cy) _cy.fit(40); }, 400);
+    // fit with smooth animation
+    setTimeout(function () { if (_cy) _cy.animate({ fit: { eles: _cy.elements(), padding: 50 }, duration: 500, easing: "ease-in-out-cubic" }); }, 400);
   }
 
   function _updateGraph(nodes, edges, cp, graphData) {
@@ -210,7 +238,7 @@ var DAGView = (function () {
         existing.data("resources", (n.resources || []).join(", "));
         existing.data("notes", n.notes || "");
         existing.data("tags", (n.tags || []).join(", "));
-        existing.data("children", (n.children || []).join(", "));
+        existing.data("children", n.children || []);
         existing.data("is_group", n.is_group || false);
         // 更新 class
         "completed,in_progress,pending,delayed,blocked".split(",").forEach(function (s) { existing.removeClass("status-" + s); });
@@ -239,9 +267,9 @@ var DAGView = (function () {
     // 4. 动画布局
     _doLayout(true);
 
-    // 5. 平滑 fit
+    // 5. smooth fit with spring easing
     setTimeout(function () {
-      if (_cy) _cy.animate({ fit: { eles: _cy.elements(), padding: 40 }, duration: 400, easing: "ease-in-out-cubic" });
+      if (_cy) _cy.animate({ fit: { eles: _cy.elements(), padding: 50 }, duration: 600, easing: "ease-in-out-cubic" });
     }, 500);
   }
 
@@ -255,13 +283,17 @@ var DAGView = (function () {
         es: n.es, ef: n.ef, ls: n.ls, lf: n.lf,
         esDate: n.es_date, efDate: n.ef_date, lsDate: n.ls_date, lfDate: n.lf_date,
         resources: (n.resources || []).join(", "), notes: n.notes || "",
-        tags: (n.tags || []).join(", "), children: (n.children || []).join(", "),
+        tags: (n.tags || []).join(", "), children: n.children || [],
       },
-      classes: ("status-" + n.status + (n.is_critical ? " critical" : "")).trim(),
+      classes: ("status-" + n.status + (n.is_critical ? " critical" : "") + (n.is_group ? " is-group" : "")).trim(),
     });
-    // fade-in
+    // smooth fade-in
     node.style("opacity", 0);
-    node.animate({ style: { opacity: 1 }, duration: 400, easing: "ease-in" });
+    node.animate({
+      style: { opacity: 1 },
+      duration: 500,
+      easing: "ease-in-out-cubic",
+    });
   }
 
   function updateNodeStatus(taskId, progress, status) {
@@ -322,12 +354,12 @@ var DAGView = (function () {
     if (_tooltip) { _tooltip.remove(); _tooltip = null; }
   }
 
-  // 注入 tooltip 样式
+  // 注入 tooltip 样式（液态玻璃风格）
   (function () {
     if (document.getElementById("dag-tooltip-style")) return;
     var s = document.createElement("style");
     s.id = "dag-tooltip-style";
-    s.textContent = ".dag-tooltip{position:absolute;z-index:1000;background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px;box-shadow:0 4px 12px rgba(0,0,0,0.15);font-size:12px;pointer-events:none;min-width:180px}.dag-tooltip strong{display:block;margin-bottom:6px;font-size:13px}.dag-tooltip table{width:100%}.dag-tooltip td{padding:2px 0}.dag-tooltip td:first-child{color:#64748b;width:60px}";
+    s.textContent = ".dag-tooltip{position:absolute;z-index:1000;background:rgba(17,17,48,0.9);backdrop-filter:blur(24px) saturate(180%);-webkit-backdrop-filter:blur(24px) saturate(180%);border:1px solid rgba(255,255,255,0.08);border-radius:14px;padding:12px 16px;box-shadow:0 8px 32px rgba(0,0,0,0.5),0 0 48px rgba(129,140,248,0.08);font-size:12px;pointer-events:none;min-width:180px;color:#e2e8f0;animation:tooltip-in 0.15s cubic-bezier(0.34,1.56,0.64,1)}.dag-tooltip strong{display:block;margin-bottom:6px;font-size:13px;background:linear-gradient(135deg,#c7d2fe,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}.dag-tooltip table{width:100%}.dag-tooltip td{padding:2px 0}.dag-tooltip td:first-child{color:#64748b;width:60px}";
     document.head.appendChild(s);
   })();
 

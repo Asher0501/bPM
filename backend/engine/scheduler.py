@@ -5,8 +5,17 @@ import logging
 import re
 from collections import deque
 from models.project import TaskNode, EdgeDef, ScheduleResult, BufferInfo
+from config import get_config
 
 logger = logging.getLogger(__name__)
+
+
+def _scheduler_config():
+    return get_config().scheduler
+
+
+def _risk_scan_config():
+    return get_config().risk_scan
 
 
 def topological_sort(nodes: list[TaskNode]) -> list[str]:
@@ -247,8 +256,8 @@ def create_schedule(
         nodes, edges, deadline_days
     )
 
-    # 计算缓冲区（项目缓冲 = 关键路径工期的 50%）
-    buffer_days = round(total_duration * 0.5, 1)
+    # 计算缓冲区（项目缓冲 = 关键路径工期 × 缓冲比例）
+    buffer_days = round(total_duration * _scheduler_config().buffer_ratio, 1)
 
     # 写回节点数据
     node_map = {n.id: n for n in nodes}
@@ -322,6 +331,7 @@ def structural_risk_scan(
     risks: list[dict] = []
     node_map = {n.id: n for n in nodes}
     risk_seq = [0]
+    rcfg = _risk_scan_config()
 
     def _rid():
         risk_seq[0] += 1
@@ -343,28 +353,28 @@ def structural_risk_scan(
             })
 
     # 2. 关键路径上低置信度节点
-    for n in [x for x in nodes if x.is_critical and x.confidence < 0.6]:
+    for n in [x for x in nodes if x.is_critical and x.confidence < rcfg.confidence_warning]:
         risks.append({
-            'risk_id': _rid(), 'level': 'warning' if n.confidence < 0.4 else 'info',
+            'risk_id': _rid(), 'level': 'warning' if n.confidence < (rcfg.confidence_warning * 0.67) else 'info',
             'dimension': '关键路径估时置信度低', 'task_id': n.id,
             'message': f'节点「{n.name}」(id={n.id}) 位于关键路径，置信度仅 {n.confidence:.0%}，工期估算不可靠。',
             'suggestion': f'建议：1) 将「{n.name}」拆分为更小的子任务 2) 参考历史数据重新估算',
         })
 
-    # 3. 汇聚点检测(入度>=3)
+    # 3. 汇聚点检测(入度>=阈值)
     indeg: dict[str, int] = {n.id: 0 for n in nodes}
     for n in nodes:
         for p in n.pre_dependencies:
             if p in indeg:
                 indeg[n.id] += 1
-    for n in [x for x in nodes if indeg.get(x.id, 0) >= 3]:
+    for n in [x for x in nodes if indeg.get(x.id, 0) >= rcfg.merge_threshold_indegree]:
         risks.append({
             'risk_id': _rid(), 'level': 'warning', 'dimension': '高汇聚度瓶颈节点', 'task_id': n.id,
             'message': f'节点「{n.name}」(id={n.id}) 入度为 {indeg[n.id]}，是高汇聚度瓶颈。',
             'suggestion': f'建议：1) 确保「{n.name}」前置有足够缓冲 2) 考虑部分前置并行化 3) 预留额外资源',
         })
 
-    # 4. 长依赖链检测(深度>5)
+    # 4. 长依赖链检测(深度>阈值)
     succs: dict[str, list[str]] = {n.id: [] for n in nodes}
     for n in nodes:
         for p in n.pre_dependencies:
@@ -381,17 +391,17 @@ def structural_risk_scan(
 
     for rid in [x.id for x in nodes if not x.pre_dependencies]:
         d = _mdepth(rid, set())
-        if d > 5:
+        if d > rcfg.chain_depth_warning:
             risks.append({
                 'risk_id': _rid(), 'level': 'info', 'dimension': '长依赖链不确定性放大', 'task_id': rid,
                 'message': f'从「{node_map[rid].name}」出发的依赖链深度为 {d} 层。链越长不确定性逐级放大。',
                 'suggestion': '建议：1) 在长链中设置中间里程碑 2) 缩短关键路径链长 3) 考虑将长链分段管理',
             })
 
-    # 5. 近关键路径检测(浮动<2天)
+    # 5. 近关键路径检测(浮动<阈值天)
     if schedule and getattr(schedule, 'critical_path', None):
-        near_cp = [n for n in nodes if not n.is_critical and n.float_days is not None and n.float_days < 2.0]
-        if len(near_cp) >= 3:
+        near_cp = [n for n in nodes if not n.is_critical and n.float_days is not None and n.float_days < rcfg.near_critical_float_days]
+        if len(near_cp) >= rcfg.near_critical_min_count:
             names = ', '.join(f'「{n.name}」({n.float_days:.1f}d)' for n in near_cp[:5])
             risks.append({
                 'risk_id': _rid(), 'level': 'warning', 'dimension': '近关键路径风险', 'task_id': None,
